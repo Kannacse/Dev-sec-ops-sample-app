@@ -19,23 +19,49 @@ pipeline {
                     test -f app.js
                     test -f package.json
                     test -f Dockerfile
+                    test -f sonar-project.properties
 
                     echo "Source verification successful."
                 '''
             }
         }
 
-        stage('Secret Scan') {
+        stage('Secret Scan - Gitleaks') {
             steps {
                 sh '''
-                    echo "Running Gitleaks secret scan..."
+                    echo "Running Gitleaks..."
 
                     gitleaks detect \
                         --source . \
-                        --no-banner \
-                        --verbose
+                        --no-banner
 
                     echo "Gitleaks scan completed successfully."
+                '''
+            }
+        }
+
+        stage('SAST - SonarQube') {
+            steps {
+                withSonarQubeEnv('sonarqube-dev-sec') {
+                    sh '''
+                        echo "Running SonarQube analysis..."
+
+                        sonar-scanner
+
+                        echo "SonarQube analysis completed."
+                    '''
+                }
+            }
+        }
+
+        stage('Dependency Audit') {
+            steps {
+                sh '''
+                    echo "Running npm dependency audit..."
+
+                    npm audit --audit-level=high
+
+                    echo "Dependency audit completed."
                 '''
             }
         }
@@ -43,7 +69,7 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 sh '''
-                    echo "Installing application dependencies..."
+                    echo "Installing dependencies..."
 
                     npm install
 
@@ -55,11 +81,39 @@ pipeline {
         stage('Application Test') {
             steps {
                 sh '''
-                    echo "Running application syntax check..."
+                    echo "Running Node.js syntax check..."
 
                     node --check app.js
 
-                    echo "Application syntax check successful."
+                    echo "Application test successful."
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    echo "Building Docker image..."
+
+                    docker build \
+                        -t devsecops-sample-app:${BUILD_NUMBER} .
+
+                    echo "Docker image built successfully."
+                '''
+            }
+        }
+
+        stage('Container Scan - Trivy') {
+            steps {
+                sh '''
+                    echo "Running Trivy container scan..."
+
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        devsecops-sample-app:${BUILD_NUMBER}
+
+                    echo "Trivy scan completed successfully."
                 '''
             }
         }
@@ -67,15 +121,15 @@ pipeline {
 
     post {
         success {
-            echo '========================================'
-            echo 'Pipeline completed successfully.'
-            echo '========================================'
+            echo '=========================================='
+            echo 'DevSecOps pipeline completed successfully'
+            echo '=========================================='
         }
 
         failure {
-            echo '========================================'
-            echo 'Pipeline failed.'
-            echo '========================================'
+            echo '=========================================='
+            echo 'DevSecOps pipeline FAILED'
+            echo '=========================================='
         }
 
         always {
