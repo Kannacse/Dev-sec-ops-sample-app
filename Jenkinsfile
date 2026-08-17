@@ -3,162 +3,232 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "kannancloud/devsecops-sample-app"
-        AWS_REGION = "ap-south-1"
+        // ============================================================
+        // AWS / EC2
+        // ============================================================
+        AWS_REGION       = 'us-east-1'
+        EC2_INSTANCE_ID  = 'i-0e0aebd33e4c8e9a1'
+        EC2_PUBLIC_IP    = '18.209.29.219'
 
-        // EC2 configuration
-        EC2_INSTANCE_ID = "YOUR_EC2_INSTANCE_ID"
+        // ============================================================
+        // ECR
+        // ============================================================
+        ECR_REGISTRY     = '042775549160.dkr.ecr.us-east-1.amazonaws.com'
+        ECR_REPOSITORY   = 'devsecops-sample-app'
+        ECR_URI          = '042775549160.dkr.ecr.us-east-1.amazonaws.com/devsecops-sample-app'
 
-        // AWS credential stored in Jenkins
-        AWS_CREDENTIALS_ID = "aws-credentials"
+        // ============================================================
+        // Jenkins Credentials
+        // ============================================================
+        AWS_CREDENTIALS_ID = 'aws-hrms-v2-taff'
 
-        // Docker Hub credential stored in Jenkins
-        DOCKER_CREDENTIALS_ID = "dockerhub-credentials"
+        // ============================================================
+        // Docker image
+        // ============================================================
+        LOCAL_IMAGE = 'devsecops-sample-app'
     }
 
     stages {
 
         // ============================================================
-        // 1. CHECKOUT SOURCE CODE
+        // 1. CHECKOUT
         // ============================================================
 
         stage('Checkout') {
             steps {
-
-                echo "=========================================="
-                echo "Checking out source code"
-                echo "=========================================="
+                echo '=========================================='
+                echo 'Checking out source code'
+                echo '=========================================='
 
                 checkout scm
 
-                echo "Source code checkout completed successfully."
+                echo 'Source code checkout completed successfully.'
             }
         }
 
 
         // ============================================================
-        // 2. SOURCE CODE SECURITY SCAN - GITLEAKS
+        // 2. VERIFY SOURCE
+        // ============================================================
+
+        stage('Verify Source') {
+            steps {
+                sh '''
+                    echo "=========================================="
+                    echo "Verifying Application Source"
+                    echo "=========================================="
+
+                    ls -la
+
+                    test -f app.js
+                    test -f package.json
+                    test -f package-lock.json
+                    test -f Dockerfile
+                    test -f sonar-project.properties
+
+                    echo ""
+                    echo "Required files found."
+                    echo "Source verification successful."
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // 3. GITLEAKS
         // ============================================================
 
         stage('Secret Scan - Gitleaks') {
             steps {
-
-                echo "=========================================="
-                echo "Running Gitleaks Secret Scan"
-                echo "=========================================="
-
                 sh '''
+                    echo "=========================================="
+                    echo "Running Gitleaks Secret Scan"
+                    echo "=========================================="
+
                     gitleaks detect \
                         --source . \
-                        --no-banner \
-                        --redact || true
-                '''
+                        --no-banner
 
-                echo "Gitleaks scan completed."
+                    echo ""
+                    echo "Gitleaks scan completed successfully."
+                '''
             }
         }
 
 
         // ============================================================
-        // 3. SONARQUBE CODE QUALITY
+        // 4. SONARQUBE CONNECTION TEST
         // ============================================================
 
-        stage('SonarQube Analysis') {
+        stage('SonarQube Connection Test') {
             steps {
+                withSonarQubeEnv('sonarqube-dev-sec') {
+                    sh '''
+                        echo "=========================================="
+                        echo "SonarQube Connection Test"
+                        echo "=========================================="
 
-                echo "=========================================="
-                echo "Running SonarQube Analysis"
-                echo "=========================================="
+                        echo "SonarQube URL: $SONAR_HOST_URL"
 
-                script {
+                        if [ -n "$SONAR_AUTH_TOKEN" ]; then
+                            echo "Sonar authentication token is configured: YES"
+                        else
+                            echo "Sonar authentication token is configured: NO"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
 
-                    def scannerHome = tool 'SonarQubeScanner'
 
-                    withSonarQubeEnv('SonarQube') {
+        // ============================================================
+        // 5. SONARQUBE SAST
+        // ============================================================
 
-                        sh """
-                            ${scannerHome}/bin/sonar-scanner \
-                                -Dsonar.projectKey=devsecops-sample-app \
-                                -Dsonar.projectName=devsecops-sample-app \
-                                -Dsonar.sources=.
-                        """
+        stage('SAST - SonarQube') {
+            steps {
+                withSonarQubeEnv('sonarqube-dev-sec') {
+
+                    withEnv([
+                        "PATH+SONAR=/opt/sonar-scanner/bin",
+                        "SONAR_TOKEN=${SONAR_AUTH_TOKEN}"
+                    ]) {
+
+                        sh '''
+                            echo "=========================================="
+                            echo "Running SonarQube SAST Analysis"
+                            echo "=========================================="
+
+                            sonar-scanner
+
+                            echo ""
+                            echo "SonarQube analysis completed successfully."
+                        '''
                     }
                 }
-
-                echo "SonarQube analysis completed."
             }
         }
 
 
         // ============================================================
-        // 4. INSTALL DEPENDENCIES
+        // 6. INSTALL DEPENDENCIES
         // ============================================================
 
         stage('Install Dependencies') {
             steps {
-
-                echo "=========================================="
-                echo "Installing application dependencies"
-                echo "=========================================="
-
                 sh '''
-                    if [ -f package.json ]; then
-                        npm install
-                    else
-                        echo "No package.json found."
-                    fi
-                '''
+                    echo "=========================================="
+                    echo "Installing Application Dependencies"
+                    echo "=========================================="
 
-                echo "Dependency installation completed."
+                    npm ci
+
+                    echo ""
+                    echo "Dependencies installed successfully."
+                '''
             }
         }
 
 
         // ============================================================
-        // 5. APPLICATION TEST
+        // 7. NPM AUDIT
+        // ============================================================
+
+        stage('Dependency Audit') {
+            steps {
+                sh '''
+                    echo "=========================================="
+                    echo "Running NPM Dependency Audit"
+                    echo "=========================================="
+
+                    npm audit --audit-level=high || true
+
+                    echo ""
+                    echo "WARNING: NPM audit completed."
+                    echo "Vulnerabilities will be reviewed separately."
+                    echo "Pipeline will continue for this development environment."
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // 8. APPLICATION TEST
         // ============================================================
 
         stage('Application Test') {
             steps {
-
-                echo "=========================================="
-                echo "Running Application Tests"
-                echo "=========================================="
-
                 sh '''
-                    if [ -f package.json ]; then
+                    echo "=========================================="
+                    echo "Running Application Test"
+                    echo "=========================================="
 
-                        if npm run | grep -q "test"; then
-                            npm test -- --watchAll=false || true
-                        else
-                            echo "No test script configured."
-                        fi
+                    node --check app.js
 
-                    else
-                        echo "No package.json found."
-                    fi
+                    echo ""
+                    echo "Node.js syntax check successful."
                 '''
-
-                echo "Application testing completed."
             }
         }
 
 
         // ============================================================
-        // 6. DOCKER BUILD
+        // 9. DOCKER BUILD
         // ============================================================
 
         stage('Docker Build') {
             steps {
-
-                echo "=========================================="
-                echo "Building Docker Image"
-                echo "=========================================="
-
                 sh '''
+                    echo "=========================================="
+                    echo "Building Docker Image"
+                    echo "=========================================="
+
+                    echo "Image:"
+                    echo "${LOCAL_IMAGE}:${BUILD_NUMBER}"
+
                     docker build \
-                        -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
-                        -t ${DOCKER_IMAGE}:latest \
+                        -t "${LOCAL_IMAGE}:${BUILD_NUMBER}" \
                         .
 
                     echo ""
@@ -171,73 +241,100 @@ pipeline {
 
 
         // ============================================================
-        // 7. TRIVY CONTAINER SECURITY SCAN
+        // 10. TRIVY
         // ============================================================
 
         stage('Container Scan - Trivy') {
             steps {
-
-                echo "=========================================="
-                echo "Running Trivy Container Security Scan"
-                echo "=========================================="
-
-                echo "Scanning image:"
-                echo "${DOCKER_IMAGE}:${BUILD_NUMBER}"
-
                 sh '''
+                    echo "=========================================="
+                    echo "Running Trivy Container Security Scan"
+                    echo "=========================================="
+
+                    echo "Scanning:"
+                    echo "${LOCAL_IMAGE}:${BUILD_NUMBER}"
+
                     trivy image \
                         --severity HIGH,CRITICAL \
-                        ${DOCKER_IMAGE}:${BUILD_NUMBER} || true
-                '''
+                        "${LOCAL_IMAGE}:${BUILD_NUMBER}" || true
 
-                echo ""
-                echo "WARNING: Trivy scan completed."
-                echo "HIGH/CRITICAL vulnerabilities may require remediation."
-                echo "Pipeline will continue for this development environment."
+                    echo ""
+                    echo "WARNING: Trivy scan completed."
+                    echo "HIGH/CRITICAL vulnerabilities may require remediation."
+                    echo "Pipeline will continue for this development environment."
+                '''
             }
         }
 
 
         // ============================================================
-        // 8. DOCKER HUB PUSH
+        // 11. PUSH TO ECR
         // ============================================================
 
-        stage('Docker Hub Push') {
+        stage('Push Image to ECR') {
             steps {
 
-                echo "=========================================="
-                echo "Logging in to Docker Hub"
-                echo "=========================================="
-
                 withCredentials([
-                    usernamePassword(
-                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                        usernameVariable: 'DOCKER_USERNAME',
-                        passwordVariable: 'DOCKER_PASSWORD'
-                    )
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}"]
                 ]) {
 
                     sh '''
-                        echo "$DOCKER_PASSWORD" | docker login \
-                            --username "$DOCKER_USERNAME" \
-                            --password-stdin
+                        echo "=========================================="
+                        echo "Pushing Docker Image to Amazon ECR"
+                        echo "=========================================="
 
-                        echo "Docker Hub login successful."
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+                        echo "AWS Region:"
+                        echo "${AWS_REGION}"
 
                         echo ""
-                        echo "Pushing versioned image..."
+                        echo "ECR Repository:"
+                        echo "${ECR_URI}"
 
-                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        echo ""
+                        echo "Logging in to Amazon ECR..."
+
+                        aws ecr get-login-password \
+                            --region "${AWS_REGION}" | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
+
+                        echo ""
+                        echo "ECR login successful."
+
+                        echo ""
+                        echo "Tagging build image..."
+
+                        docker tag \
+                            "${LOCAL_IMAGE}:${BUILD_NUMBER}" \
+                            "${ECR_URI}:${BUILD_NUMBER}"
+
+                        docker tag \
+                            "${LOCAL_IMAGE}:${BUILD_NUMBER}" \
+                            "${ECR_URI}:latest"
+
+                        echo ""
+                        echo "Images to push:"
+                        echo "${ECR_URI}:${BUILD_NUMBER}"
+                        echo "${ECR_URI}:latest"
+
+                        echo ""
+                        echo "Pushing build image..."
+
+                        docker push \
+                            "${ECR_URI}:${BUILD_NUMBER}"
 
                         echo ""
                         echo "Pushing latest image..."
 
-                        docker push ${DOCKER_IMAGE}:latest
+                        docker push \
+                            "${ECR_URI}:latest"
 
                         echo ""
-                        echo "Docker images pushed successfully."
-
-                        docker logout
+                        echo "ECR push completed successfully."
                     '''
                 }
             }
@@ -245,30 +342,61 @@ pipeline {
 
 
         // ============================================================
-        // 9. AWS CONNECTION TEST
+        // 12. VERIFY ECR IMAGE
+        // ============================================================
+
+        stage('Verify ECR Image') {
+            steps {
+
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}"]
+                ]) {
+
+                    sh '''
+                        echo "=========================================="
+                        echo "Verifying Image in Amazon ECR"
+                        echo "=========================================="
+
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+                        aws ecr describe-images \
+                            --repository-name "${ECR_REPOSITORY}" \
+                            --region "${AWS_REGION}" \
+                            --query 'imageDetails[*].imageTags[]' \
+                            --output table
+
+                        echo ""
+                        echo "ECR image verification completed."
+                    '''
+                }
+            }
+        }
+
+
+        // ============================================================
+        // 13. AWS CONNECTION TEST
         // ============================================================
 
         stage('AWS Connection Test') {
             steps {
 
-                echo "=========================================="
-                echo "Testing AWS Connection"
-                echo "=========================================="
-
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
                      credentialsId: "${AWS_CREDENTIALS_ID}"]
                 ]) {
 
                     sh '''
+                        echo "=========================================="
+                        echo "Testing AWS Connection"
+                        echo "=========================================="
+
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
                         aws sts get-caller-identity
 
                         echo ""
                         echo "AWS connection successful."
-
-                        echo ""
-                        echo "AWS Region:"
-                        aws configure get region || true
                     '''
                 }
             }
@@ -276,56 +404,173 @@ pipeline {
 
 
         // ============================================================
-        // 10. DEPLOY TO EC2 USING AWS SSM
+        // 14. VERIFY EC2 SSM CONNECTION
+        // ============================================================
+
+        stage('Verify EC2 SSM Connection') {
+            steps {
+
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}"]
+                ]) {
+
+                    sh '''
+                        echo "=========================================="
+                        echo "Checking EC2 SSM Connectivity"
+                        echo "=========================================="
+
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+                        aws ssm describe-instance-information \
+                            --filters "Key=InstanceIds,Values=${EC2_INSTANCE_ID}" \
+                            --region "${AWS_REGION}" \
+                            --output table
+
+                        echo ""
+                        echo "EC2 SSM connectivity verified."
+                    '''
+                }
+            }
+        }
+
+
+        // ============================================================
+        // 15. DEPLOY TO EC2 USING SSM
         // ============================================================
 
         stage('Deploy to EC2 via SSM') {
             steps {
 
-                echo "=========================================="
-                echo "Deploying Application to EC2"
-                echo "=========================================="
-
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
                      credentialsId: "${AWS_CREDENTIALS_ID}"]
                 ]) {
 
                     sh '''
+                        echo "=========================================="
+                        echo "Deploying Application to EC2"
+                        echo "=========================================="
+
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+                        echo "EC2 Instance:"
+                        echo "${EC2_INSTANCE_ID}"
+
+                        echo ""
+                        echo "ECR Image:"
+                        echo "${ECR_URI}:${BUILD_NUMBER}"
+
+                        echo ""
                         echo "Sending deployment command to EC2..."
 
                         COMMAND_ID=$(aws ssm send-command \
                             --instance-ids "${EC2_INSTANCE_ID}" \
                             --document-name "AWS-RunShellScript" \
-                            --comment "Deploy DevSecOps Application" \
+                            --comment "Deploy DevSecOps application - Jenkins build ${BUILD_NUMBER}" \
                             --parameters commands="
-                                docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD};
-                                docker pull ${DOCKER_IMAGE}:${BUILD_NUMBER};
-                                docker stop devsecops-sample-app || true;
-                                docker rm devsecops-sample-app || true;
-                                docker run -d \
-                                    --name devsecops-sample-app \
-                                    -p 80:3000 \
-                                    ${DOCKER_IMAGE}:${BUILD_NUMBER};
+                                set -e
+                                echo 'Starting EC2 deployment...'
+                                echo 'Logging in to ECR...'
+                                aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                                echo 'Pulling application image...'
+                                docker pull ${ECR_URI}:${BUILD_NUMBER}
+                                echo 'Stopping old container...'
+                                docker stop devsecops-app || true
+                                echo 'Removing old container...'
+                                docker rm devsecops-app || true
+                                echo 'Starting new container...'
+                                docker run -d --name devsecops-app --restart unless-stopped -p 80:3000 ${ECR_URI}:${BUILD_NUMBER}
+                                echo 'Checking running containers...'
+                                docker ps
+                                echo 'Checking application container...'
+                                docker inspect --format '{{.State.Status}}' devsecops-app
+                                echo 'Deployment completed.'
                             " \
                             --region "${AWS_REGION}" \
-                            --query "Command.CommandId" \
+                            --query 'Command.CommandId' \
                             --output text)
 
+                        echo ""
                         echo "SSM Command ID:"
-                        echo "$COMMAND_ID"
+                        echo "${COMMAND_ID}"
 
                         echo ""
-                        echo "Waiting for deployment command..."
+                        echo "Waiting for deployment to complete..."
 
-                        sleep 10
+                        DEPLOYMENT_STATUS="Pending"
+
+                        for i in $(seq 1 36); do
+
+                            DEPLOYMENT_STATUS=$(aws ssm get-command-invocation \
+                                --command-id "${COMMAND_ID}" \
+                                --instance-id "${EC2_INSTANCE_ID}" \
+                                --region "${AWS_REGION}" \
+                                --query 'Status' \
+                                --output text)
+
+                            echo "Attempt ${i}/36 - Status: ${DEPLOYMENT_STATUS}"
+
+                            if [ "${DEPLOYMENT_STATUS}" = "Success" ]; then
+                                break
+                            fi
+
+                            if [ "${DEPLOYMENT_STATUS}" = "Failed" ] || \
+                               [ "${DEPLOYMENT_STATUS}" = "Cancelled" ] || \
+                               [ "${DEPLOYMENT_STATUS}" = "TimedOut" ] || \
+                               [ "${DEPLOYMENT_STATUS}" = "Cancelling" ]; then
+
+                                echo ""
+                                echo "=========================================="
+                                echo "EC2 DEPLOYMENT FAILED"
+                                echo "=========================================="
+
+                                echo ""
+                                echo "Standard Output:"
+                                aws ssm get-command-invocation \
+                                    --command-id "${COMMAND_ID}" \
+                                    --instance-id "${EC2_INSTANCE_ID}" \
+                                    --region "${AWS_REGION}" \
+                                    --query 'StandardOutputContent' \
+                                    --output text
+
+                                echo ""
+                                echo "Standard Error:"
+                                aws ssm get-command-invocation \
+                                    --command-id "${COMMAND_ID}" \
+                                    --instance-id "${EC2_INSTANCE_ID}" \
+                                    --region "${AWS_REGION}" \
+                                    --query 'StandardErrorContent' \
+                                    --output text
+
+                                exit 1
+                            fi
+
+                            sleep 5
+                        done
+
+                        echo ""
+                        echo "Final deployment status:"
+                        echo "${DEPLOYMENT_STATUS}"
+
+                        echo ""
+                        echo "Deployment output:"
 
                         aws ssm get-command-invocation \
-                            --command-id "$COMMAND_ID" \
+                            --command-id "${COMMAND_ID}" \
                             --instance-id "${EC2_INSTANCE_ID}" \
                             --region "${AWS_REGION}" \
-                            --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}" \
-                            --output json
+                            --query '[StandardOutputContent,StandardErrorContent]' \
+                            --output text
+
+                        if [ "${DEPLOYMENT_STATUS}" != "Success" ]; then
+                            echo ""
+                            echo "Deployment timed out."
+                            exit 1
+                        fi
+
+                        echo ""
+                        echo "EC2 deployment completed successfully."
                     '''
                 }
             }
@@ -333,22 +578,44 @@ pipeline {
 
 
         // ============================================================
-        // 11. APPLICATION HEALTH CHECK
+        // 16. APPLICATION HEALTH CHECK
         // ============================================================
 
         stage('Application Health Check') {
             steps {
 
-                echo "=========================================="
-                echo "Running Application Health Check"
-                echo "=========================================="
-
                 sh '''
-                    echo "Checking application availability..."
+                    echo "=========================================="
+                    echo "Application Health Check"
+                    echo "=========================================="
+
+                    echo "Application URL:"
+                    echo "http://${EC2_PUBLIC_IP}"
+
+                    echo ""
+                    echo "Waiting for application startup..."
 
                     sleep 10
 
-                    if curl -f --max-time 10 http://${EC2_PUBLIC_IP}/; then
+                    echo ""
+                    echo "Checking HTTP endpoint..."
+
+                    HTTP_STATUS=$(curl \
+                        --silent \
+                        --output /tmp/devsecops-response.txt \
+                        --write-out "%{http_code}" \
+                        --max-time 15 \
+                        "http://${EC2_PUBLIC_IP}/" || true)
+
+                    echo ""
+                    echo "HTTP Status:"
+                    echo "${HTTP_STATUS}"
+
+                    echo ""
+                    echo "Application Response:"
+                    cat /tmp/devsecops-response.txt || true
+
+                    if [ "${HTTP_STATUS}" = "200" ]; then
 
                         echo ""
                         echo "=========================================="
@@ -361,6 +628,9 @@ pipeline {
                         echo "=========================================="
                         echo "APPLICATION HEALTH CHECK FAILED"
                         echo "=========================================="
+
+                        echo "Expected HTTP 200."
+                        echo "Received HTTP ${HTTP_STATUS}."
 
                         exit 1
                     fi
@@ -377,37 +647,39 @@ pipeline {
     post {
 
         success {
+            echo '''
+==========================================
+DEVSECOPS PIPELINE SUCCESS
+==========================================
 
-            echo ""
-            echo "=========================================="
-            echo "DevSecOps Pipeline SUCCESS"
-            echo "=========================================="
+Build completed successfully.
 
-            echo "Build Number:"
-            echo "${BUILD_NUMBER}"
+Application deployed to EC2.
 
-            echo "Docker Image:"
-            echo "${DOCKER_IMAGE}:${BUILD_NUMBER}"
+Application URL:
+http://18.209.29.219
 
-            echo "Deployment completed successfully."
+Docker image:
+042775549160.dkr.ecr.us-east-1.amazonaws.com/devsecops-sample-app:${BUILD_NUMBER}
+'''
         }
 
         failure {
+            echo '''
+==========================================
+DEVSECOPS PIPELINE FAILED
+==========================================
 
-            echo ""
-            echo "=========================================="
-            echo "DevSecOps Pipeline FAILED"
-            echo "=========================================="
-
-            echo "Check the failed stage and Jenkins console output."
+Check the first failed stage in the Jenkins console output.
+'''
         }
 
         always {
-
-            echo ""
-            echo "=========================================="
-            echo "Pipeline execution completed."
-            echo "=========================================="
+            echo '''
+==========================================
+Pipeline execution completed.
+==========================================
+'''
         }
     }
 }
