@@ -5,39 +5,35 @@ pipeline {
     environment {
 
         // ============================================================
-        // AWS CONFIGURATION
+        // AWS
         // ============================================================
 
         AWS_REGION = 'us-east-1'
-
         AWS_ACCOUNT_ID = '042775549160'
 
+        // Jenkins -> Manage Jenkins -> Credentials
         AWS_CREDENTIALS_ID = 'aws-jenkins'
 
+        // ECR
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
         ECR_REPOSITORY = 'devsecops-sample-app'
-
         ECR_URI = "${ECR_REGISTRY}/${ECR_REPOSITORY}"
 
+        // EC2
         EC2_INSTANCE_ID = 'i-0e0aebd33e4c8e9a1'
 
-
         // ============================================================
-        // SONARQUBE
+        // SonarQube
         // ============================================================
 
         SONARQUBE_SERVER = 'sonarqube-dev-sec'
 
-
         // ============================================================
-        // APPLICATION CONFIGURATION
+        // Application
         // ============================================================
 
         APP_NAME = 'devsecops-app'
-
         APP_PORT = '3000'
-
         HOST_PORT = '80'
     }
 
@@ -74,8 +70,6 @@ pipeline {
                     echo "Verifying Application Source"
                     echo "=========================================="
 
-                    echo ""
-                    echo "Workspace:"
                     pwd
 
                     echo ""
@@ -127,7 +121,7 @@ pipeline {
 
 
         // ============================================================
-        // 4. SONARQUBE CONNECTION TEST
+        // 4. SONARQUBE CONNECTION
         // ============================================================
 
         stage('SonarQube Connection Test') {
@@ -154,7 +148,7 @@ pipeline {
                         fi
 
                         echo ""
-                        echo "SonarQube connection configuration successful."
+                        echo "SonarQube configuration successful."
                     '''
                 }
             }
@@ -219,7 +213,7 @@ pipeline {
 
 
         // ============================================================
-        // 7. NPM DEPENDENCY AUDIT
+        // 7. NPM AUDIT
         // ============================================================
 
         stage('Dependency Audit') {
@@ -235,7 +229,7 @@ pipeline {
 
                     echo ""
                     echo "WARNING: NPM audit completed."
-                    echo "Review dependency vulnerabilities."
+                    echo "Dependency vulnerabilities may exist."
                     echo "Pipeline will continue."
                 '''
             }
@@ -281,7 +275,6 @@ pipeline {
                     echo "Building Docker Image"
                     echo "=========================================="
 
-                    echo ""
                     echo "Build Number:"
                     echo "${BUILD_NUMBER}"
 
@@ -306,7 +299,8 @@ pipeline {
 
 
         // ============================================================
-        // 10. TRIVY CONTAINER SECURITY SCAN
+        // 10. TRIVY
+        // Vulnerabilities are WARNINGS only
         // ============================================================
 
         stage('Container Scan - Trivy') {
@@ -319,16 +313,22 @@ pipeline {
                     echo "=========================================="
 
                     echo ""
-                    echo "Scanning:"
+                    echo "Scanning image:"
                     echo "${ECR_URI}:${BUILD_NUMBER}"
+
+                    echo ""
 
                     trivy image \
                         --severity HIGH,CRITICAL \
                         "${ECR_URI}:${BUILD_NUMBER}" || true
 
                     echo ""
+                    echo "=========================================="
                     echo "WARNING: Trivy scan completed."
-                    echo "HIGH/CRITICAL vulnerabilities may require remediation."
+                    echo "=========================================="
+
+                    echo ""
+                    echo "HIGH/CRITICAL vulnerabilities may have been detected."
                     echo "Pipeline will continue for this development environment."
                 '''
             }
@@ -336,7 +336,7 @@ pipeline {
 
 
         // ============================================================
-        // 11. PUSH IMAGE TO ECR
+        // 11. PUSH TO ECR
         // ============================================================
 
         stage('Push Image to ECR') {
@@ -411,7 +411,7 @@ pipeline {
 
 
         // ============================================================
-        // 12. VERIFY ECR IMAGE
+        // 12. VERIFY ECR
         // ============================================================
 
         stage('Verify ECR Image') {
@@ -489,7 +489,7 @@ pipeline {
 
 
         // ============================================================
-        // 14. VERIFY EC2 SSM CONNECTION
+        // 14. VERIFY EC2 SSM
         // ============================================================
 
         stage('Verify EC2 SSM Connection') {
@@ -574,9 +574,9 @@ pipeline {
                         echo "${ECR_URI}:${BUILD_NUMBER}"
 
 
-                        # ==================================================
-                        # Create SSM command JSON
-                        # ==================================================
+                        # ------------------------------------------------
+                        # Create SSM deployment JSON
+                        # ------------------------------------------------
 
                         cat > /tmp/ec2-deploy-commands.json <<EOF
 {
@@ -614,13 +614,12 @@ EOF
 
 
                         echo ""
-                        echo "SSM deployment JSON:"
-                        cat /tmp/ec2-deploy-commands.json
+                        echo "SSM deployment configuration created."
 
 
-                        # ==================================================
+                        # ------------------------------------------------
                         # Send SSM command
-                        # ==================================================
+                        # ------------------------------------------------
 
                         echo ""
                         echo "Sending deployment command to EC2..."
@@ -646,14 +645,16 @@ EOF
                         fi
 
 
-                        # ==================================================
-                        # Wait for deployment
-                        # ==================================================
+                        # ------------------------------------------------
+                        # Wait for SSM deployment
+                        # ------------------------------------------------
 
                         echo ""
                         echo "Waiting for EC2 deployment..."
 
+
                         DEPLOYMENT_COMPLETE="false"
+
 
                         for i in $(seq 1 36); do
 
@@ -665,6 +666,7 @@ EOF
                                 --output text 2>/dev/null || echo "Pending")
 
                             echo "Attempt ${i}/36 - Status: ${STATUS}"
+
 
                             case "${STATUS}" in
 
@@ -823,7 +825,6 @@ EOF
                                 --query 'Status' \
                                 --output text 2>/dev/null || echo "Pending")
 
-
                             echo "Health check attempt ${i}/24 - Status: ${STATUS}"
 
 
@@ -931,10 +932,6 @@ EOF
 DEVSECOPS PIPELINE SUCCESS
 ==========================================
 
-Pipeline completed successfully.
-
-Flow:
-
 GitHub
   |
   v
@@ -942,7 +939,7 @@ Jenkins
   |
   +-- Gitleaks
   |
-  +-- SonarQube
+  +-- SonarQube SAST
   |
   +-- NPM Audit
   |
@@ -950,11 +947,11 @@ Jenkins
   |
   +-- Docker Build
   |
-  +-- Trivy
+  +-- Trivy Security Scan
   |
   +-- Amazon ECR
   |
-  +-- AWS SSM
+  +-- AWS Systems Manager
   |
   +-- EC2
   |
@@ -962,11 +959,10 @@ Jenkins
   |
   +-- Application Health Check
 
+Deployment completed successfully.
+
 Application:
 http://18.209.29.219
-
-ECR:
-042775549160.dkr.ecr.us-east-1.amazonaws.com/devsecops-sample-app
 '''
         }
 
@@ -980,7 +976,7 @@ DEVSECOPS PIPELINE FAILED
 
 Check the Jenkins Console Output.
 
-Find the FIRST stage that failed.
+Find the FIRST failed stage.
 '''
         }
 
