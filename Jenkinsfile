@@ -40,12 +40,34 @@ pipeline {
             }
         }
 
+        stage('SonarQube Connection Test') {
+            steps {
+                withSonarQubeEnv('sonarqube-dev-sec') {
+                    sh '''
+                        echo "=========================================="
+                        echo "SonarQube Connection Test"
+                        echo "=========================================="
+
+                        echo "SonarQube URL: $SONAR_HOST_URL"
+
+                        if [ -n "$SONAR_AUTH_TOKEN" ]; then
+                            echo "Sonar authentication token is configured: YES"
+                        else
+                            echo "Sonar authentication token is configured: NO"
+                        fi
+                    '''
+                }
+            }
+        }
+
         stage('SAST - SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube-dev-sec') {
                     withEnv(["PATH+SONAR=/opt/sonar-scanner/bin"]) {
                         sh '''
-                            echo "Running SonarQube analysis..."
+                            echo "=========================================="
+                            echo "Running SonarQube Analysis"
+                            echo "=========================================="
 
                             sonar-scanner
 
@@ -53,18 +75,6 @@ pipeline {
                         '''
                     }
                 }
-            }
-        }
-
-        stage('Dependency Audit') {
-            steps {
-                sh '''
-                    echo "Running npm dependency audit..."
-
-                    npm audit --audit-level=high
-
-                    echo "Dependency audit completed."
-                '''
             }
         }
 
@@ -76,6 +86,18 @@ pipeline {
                     npm install
 
                     echo "Dependencies installed successfully."
+                '''
+            }
+        }
+
+        stage('Dependency Audit') {
+            steps {
+                sh '''
+                    echo "Running npm dependency audit..."
+
+                    npm audit --audit-level=high
+
+                    echo "Dependency audit completed."
                 '''
             }
         }
@@ -95,12 +117,16 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
-                    echo "Building Docker image..."
+                    echo "=========================================="
+                    echo "Building Docker Image"
+                    echo "=========================================="
 
                     docker build \
                         -t devsecops-sample-app:${BUILD_NUMBER} .
 
                     echo "Docker image built successfully."
+
+                    docker images | grep devsecops-sample-app
                 '''
             }
         }
@@ -108,7 +134,9 @@ pipeline {
         stage('Container Scan - Trivy') {
             steps {
                 sh '''
-                    echo "Running Trivy container scan..."
+                    echo "=========================================="
+                    echo "Running Trivy Container Scan"
+                    echo "=========================================="
 
                     trivy image \
                         --severity HIGH,CRITICAL \
@@ -122,20 +150,23 @@ pipeline {
     }
 
     post {
+
         success {
             echo '=========================================='
-            echo 'DevSecOps pipeline completed successfully'
+            echo 'DevSecOps Pipeline Completed Successfully'
             echo '=========================================='
         }
 
         failure {
             echo '=========================================='
-            echo 'DevSecOps pipeline FAILED'
+            echo 'DevSecOps Pipeline FAILED'
             echo '=========================================='
         }
 
         always {
+            echo '=========================================='
             echo 'Pipeline execution completed.'
+            echo '=========================================='
         }
     }
 }
