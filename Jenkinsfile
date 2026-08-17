@@ -61,6 +61,27 @@ pipeline {
         }
 
         stage('SAST - SonarQube') {
+    steps {
+        withSonarQubeEnv('sonarqube-dev-sec') {
+            withEnv([
+                "PATH+SONAR=/opt/sonar-scanner/bin",
+                "SONAR_TOKEN=${SONAR_AUTH_TOKEN}"
+            ]) {
+                sh '''
+                    echo "=========================================="
+                    echo "Running SonarQube Analysis"
+                    echo "=========================================="
+
+                    sonar-scanner
+
+                    echo "SonarQube analysis completed successfully."
+                '''
+            }
+        }
+    }
+}
+
+stage('SAST - SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube-dev-sec') {
                     withEnv(["PATH+SONAR=/opt/sonar-scanner/bin"]) {
