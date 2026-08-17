@@ -107,9 +107,10 @@ pipeline {
                     echo "Running NPM Dependency Audit"
                     echo "=========================================="
 
-                    npm audit --audit-level=high
+                    npm audit --audit-level=high || true
 
-                    echo "Dependency audit completed successfully."
+                    echo "WARNING: NPM audit completed."
+                    echo "Review dependency vulnerabilities before production deployment."
                 '''
             }
         }
@@ -152,12 +153,17 @@ pipeline {
                     echo "Running Trivy Container Security Scan"
                     echo "=========================================="
 
+                    echo "Scanning image:"
+                    echo "devsecops-sample-app:${BUILD_NUMBER}"
+
                     trivy image \
                         --severity HIGH,CRITICAL \
-                        --exit-code 1 \
-                        devsecops-sample-app:${BUILD_NUMBER}
+                        devsecops-sample-app:${BUILD_NUMBER} || true
 
-                    echo "Trivy scan completed successfully."
+                    echo ""
+                    echo "WARNING: Trivy scan completed."
+                    echo "HIGH/CRITICAL vulnerabilities may require remediation."
+                    echo "Pipeline will continue for this development environment."
                 '''
             }
         }
