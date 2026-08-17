@@ -12,7 +12,9 @@ pipeline {
         stage('Verify Source') {
             steps {
                 sh '''
-                    echo "Checking application files..."
+                    echo "=========================================="
+                    echo "Verifying Application Source"
+                    echo "=========================================="
 
                     ls -la
 
@@ -29,7 +31,9 @@ pipeline {
         stage('Secret Scan - Gitleaks') {
             steps {
                 sh '''
-                    echo "Running Gitleaks..."
+                    echo "=========================================="
+                    echo "Running Gitleaks Secret Scan"
+                    echo "=========================================="
 
                     gitleaks detect \
                         --source . \
@@ -54,6 +58,7 @@ pipeline {
                             echo "Sonar authentication token is configured: YES"
                         else
                             echo "Sonar authentication token is configured: NO"
+                            exit 1
                         fi
                     '''
                 }
@@ -61,38 +66,20 @@ pipeline {
         }
 
         stage('SAST - SonarQube') {
-    steps {
-        withSonarQubeEnv('sonarqube-dev-sec') {
-            withEnv([
-                "PATH+SONAR=/opt/sonar-scanner/bin",
-                "SONAR_TOKEN=${SONAR_AUTH_TOKEN}"
-            ]) {
-                sh '''
-                    echo "=========================================="
-                    echo "Running SonarQube Analysis"
-                    echo "=========================================="
-
-                    sonar-scanner
-
-                    echo "SonarQube analysis completed successfully."
-                '''
-            }
-        }
-    }
-}
-
-stage('SAST - SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube-dev-sec') {
-                    withEnv(["PATH+SONAR=/opt/sonar-scanner/bin"]) {
+                    withEnv([
+                        "PATH+SONAR=/opt/sonar-scanner/bin",
+                        "SONAR_TOKEN=${SONAR_AUTH_TOKEN}"
+                    ]) {
                         sh '''
                             echo "=========================================="
-                            echo "Running SonarQube Analysis"
+                            echo "Running SonarQube SAST Analysis"
                             echo "=========================================="
 
                             sonar-scanner
 
-                            echo "SonarQube analysis completed."
+                            echo "SonarQube analysis completed successfully."
                         '''
                     }
                 }
@@ -102,7 +89,9 @@ stage('SAST - SonarQube') {
         stage('Install Dependencies') {
             steps {
                 sh '''
-                    echo "Installing application dependencies..."
+                    echo "=========================================="
+                    echo "Installing Application Dependencies"
+                    echo "=========================================="
 
                     npm install
 
@@ -114,11 +103,13 @@ stage('SAST - SonarQube') {
         stage('Dependency Audit') {
             steps {
                 sh '''
-                    echo "Running npm dependency audit..."
+                    echo "=========================================="
+                    echo "Running NPM Dependency Audit"
+                    echo "=========================================="
 
                     npm audit --audit-level=high
 
-                    echo "Dependency audit completed."
+                    echo "Dependency audit completed successfully."
                 '''
             }
         }
@@ -126,11 +117,13 @@ stage('SAST - SonarQube') {
         stage('Application Test') {
             steps {
                 sh '''
-                    echo "Running Node.js syntax check..."
+                    echo "=========================================="
+                    echo "Running Application Test"
+                    echo "=========================================="
 
                     node --check app.js
 
-                    echo "Application test successful."
+                    echo "Application syntax check successful."
                 '''
             }
         }
@@ -156,7 +149,7 @@ stage('SAST - SonarQube') {
             steps {
                 sh '''
                     echo "=========================================="
-                    echo "Running Trivy Container Scan"
+                    echo "Running Trivy Container Security Scan"
                     echo "=========================================="
 
                     trivy image \
