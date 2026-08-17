@@ -43,13 +43,15 @@ pipeline {
         stage('SAST - SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube-dev-sec') {
-                    sh '''
-                        echo "Running SonarQube analysis..."
+                    withEnv(["PATH+SONAR=/opt/sonar-scanner/bin"]) {
+                        sh '''
+                            echo "Running SonarQube analysis..."
 
-                        sonar-scanner
+                            sonar-scanner
 
-                        echo "SonarQube analysis completed."
-                    '''
+                            echo "SonarQube analysis completed."
+                        '''
+                    }
                 }
             }
         }
@@ -69,7 +71,7 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 sh '''
-                    echo "Installing dependencies..."
+                    echo "Installing application dependencies..."
 
                     npm install
 
