@@ -337,6 +337,9 @@ pipeline {
                     echo "TRIVY CONTAINER SECURITY SCAN"
                     echo "=========================================="
 
+                    echo ""
+                    echo "Checking Trivy version..."
+
                     trivy --version
 
                     echo ""
@@ -344,9 +347,14 @@ pipeline {
                     echo "$ECR_URI:$BUILD_NUMBER"
 
                     echo ""
-                    echo "HIGH and CRITICAL vulnerabilities will be reported."
-                    echo "Findings are WARNING ONLY."
-                    echo "Pipeline will continue."
+                    echo "=========================================="
+                    echo "SECURITY SCAN POLICY"
+                    echo "=========================================="
+                    echo "Severity: HIGH, CRITICAL"
+                    echo "Policy: WARNING ONLY"
+                    echo "Pipeline will continue after findings."
+                    echo "=========================================="
+
                     echo ""
 
                     trivy image \
@@ -925,7 +933,7 @@ EOF
 
                         # ==================================================
                         # WAIT
-                        # ====================================================
+                        # ==================================================
 
                         aws ssm wait command-executed \
                             --command-id "$COMMAND_ID" \
@@ -935,7 +943,7 @@ EOF
 
                         # ==================================================
                         # STATUS
-                        # ====================================================
+                        # ==================================================
 
                         STATUS=$(aws ssm get-command-invocation \
                             --command-id "$COMMAND_ID" \
