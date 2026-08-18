@@ -11,7 +11,7 @@ pipeline {
         AWS_ACCOUNT_ID = '042775549160'
 
         // KEEP YOUR EXISTING JENKINS AWS CREDENTIAL ID HERE
-        AWS_CREDENTIALS_ID = 'YOUR_EXISTING_AWS_CREDENTIAL_ID'
+        AWS_CREDENTIALS_ID = 'aws-hrms-v2-taff'
 
         // ============================================================
         // ECR
