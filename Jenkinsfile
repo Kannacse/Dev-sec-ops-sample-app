@@ -118,14 +118,14 @@ pipeline {
                         --no-banner
 
                     echo ""
-                    echo "Gitleaks scan passed."
+                    echo "Gitleaks scan completed successfully."
                 '''
             }
         }
 
 
         // ============================================================
-        // 4. SONARQUBE CONNECTION
+        // 4. SONARQUBE CONNECTION TEST
         // ============================================================
 
         stage('SonarQube Connection Test') {
@@ -155,7 +155,7 @@ pipeline {
 
 
         // ============================================================
-        // 5. SONARQUBE SAST
+        // 5. SAST - SONARQUBE
         // ============================================================
 
         stage('SAST - SonarQube') {
@@ -177,17 +177,15 @@ pipeline {
                             echo "SONARQUBE SAST SCAN"
                             echo "=========================================="
 
-                            export PATH="${SONAR_SCANNER_HOME}/bin:$PATH"
-
                             echo ""
                             echo "Checking SonarScanner..."
 
-                            sonar-scanner --version
+                            "${SONAR_SCANNER_HOME}/bin/sonar-scanner" --version
 
                             echo ""
                             echo "Running SonarQube SAST..."
 
-                            sonar-scanner \
+                            "${SONAR_SCANNER_HOME}/bin/sonar-scanner" \
                                 -Dsonar.token="$SONAR_TOKEN"
 
                             echo ""
@@ -209,11 +207,8 @@ pipeline {
                     set -e
 
                     echo "=========================================="
-                    echo "INSTALLING NODE DEPENDENCIES"
+                    echo "INSTALLING DEPENDENCIES"
                     echo "=========================================="
-
-                    node --version
-                    npm --version
 
                     npm ci
 
@@ -262,7 +257,7 @@ pipeline {
                     npm test --if-present
 
                     echo ""
-                    echo "Application test completed."
+                    echo "Application test stage completed."
                 '''
             }
         }
@@ -290,9 +285,11 @@ pipeline {
                         .
 
                     echo ""
-                    echo "Docker build successful."
-
+                    echo "Docker images:"
                     docker images "$ECR_URI"
+
+                    echo ""
+                    echo "Docker build successful."
                 '''
             }
         }
@@ -326,7 +323,7 @@ pipeline {
 
 
         // ============================================================
-        // 11. AWS CONNECTION
+        // 11. AWS CONNECTION TEST
         // ============================================================
 
         stage('AWS Connection Test') {
@@ -396,10 +393,11 @@ pipeline {
                             --region "$AWS_REGION" |
                             docker login \
                             --username AWS \
-                            --password-stdin "$ECR_REGISTRY"
+                            --password-stdin \
+                            "$ECR_REGISTRY"
 
                         echo ""
-                        echo "Pushing build-number image..."
+                        echo "Pushing build image..."
 
                         docker push \
                             "$ECR_URI:$BUILD_NUMBER"
@@ -491,23 +489,18 @@ pipeline {
 
                         export AWS_DEFAULT_REGION="$AWS_REGION"
 
-                        aws ssm describe-instance-information \
+                        INSTANCE_INFO=$(aws ssm describe-instance-information \
                             --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
                             --region "$AWS_REGION" \
                             --query 'InstanceInformationList[0].[InstanceId,PingStatus,AgentVersion]' \
-                            --output table
-
-                        PING_STATUS=$(aws ssm describe-instance-information \
-                            --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'InstanceInformationList[0].PingStatus' \
                             --output text)
 
-                        echo ""
-                        echo "SSM Ping Status: $PING_STATUS"
+                        echo "$INSTANCE_INFO"
 
-                        if [ "$PING_STATUS" != "Online" ]; then
-                            echo "EC2 is not Online in SSM."
+                        if [ -z "$INSTANCE_INFO" ] || \
+                           echo "$INSTANCE_INFO" | grep -q "None"; then
+
+                            echo "EC2 is not available through SSM."
                             exit 1
                         fi
 
@@ -544,8 +537,7 @@ pipeline {
 
                         export AWS_DEFAULT_REGION="$AWS_REGION"
 
-                        echo ""
-                        echo "EC2 Instance:"
+                        echo "EC2:"
                         echo "$EC2_INSTANCE_ID"
 
                         echo ""
@@ -553,9 +545,9 @@ pipeline {
                         echo "$ECR_IMAGE"
 
 
-                        # ==================================================
-                        # Create deployment script
-                        # ==================================================
+                        # ====================================================
+                        # CREATE EC2 DEPLOYMENT SCRIPT
+                        # ====================================================
 
                         cat > /tmp/ec2-deploy.sh <<EOF
 #!/bin/bash
@@ -567,12 +559,16 @@ echo "EC2 DEPLOYMENT STARTED"
 echo "=========================================="
 
 echo ""
+echo "Checking AWS CLI..."
+aws --version
+
+echo ""
 echo "Checking Docker..."
 docker --version
 
 echo ""
-echo "Checking AWS CLI..."
-aws --version
+echo "Checking curl..."
+curl --version | head -n 1
 
 echo ""
 echo "ECR Registry:"
@@ -583,13 +579,13 @@ echo "Application:"
 echo "$APP_NAME"
 
 echo ""
-echo "Exact Image:"
+echo "Image:"
 echo "$ECR_IMAGE"
 
 
-# ==================================================
+# ====================================================
 # ECR LOGIN
-# ==================================================
+# ====================================================
 
 echo ""
 echo "Logging into Amazon ECR..."
@@ -601,56 +597,57 @@ aws ecr get-login-password \
     --password-stdin \
     "$ECR_REGISTRY"
 
+echo ""
 echo "ECR login successful."
 
 
-# ==================================================
+# ====================================================
 # PULL EXACT IMAGE
-# ==================================================
+# ====================================================
 
 echo ""
-echo "Pulling exact ECR image..."
+echo "Pulling exact image by digest..."
 
 docker pull "$ECR_IMAGE"
 
 
-# ==================================================
-# STOP OLD CONTAINER
-# ==================================================
+# ====================================================
+# STOP EXISTING CONTAINER
+# ====================================================
 
 echo ""
-echo "Stopping existing container..."
+echo "Stopping existing application..."
 
 docker stop "$APP_NAME" || true
 
 
-# ==================================================
-# REMOVE OLD CONTAINER
-# ==================================================
+# ====================================================
+# REMOVE EXISTING CONTAINER
+# ====================================================
 
 echo ""
-echo "Removing existing container..."
+echo "Removing existing application..."
 
 docker rm "$APP_NAME" || true
 
 
-# ==================================================
+# ====================================================
 # START NEW CONTAINER
-# ==================================================
+# ====================================================
 
 echo ""
-echo "Starting new container..."
+echo "Starting new application..."
 
 docker run -d \
     --name "$APP_NAME" \
     --restart unless-stopped \
-    -p "$HOST_PORT:$APP_PORT" \
+    --publish "$HOST_PORT:$APP_PORT" \
     "$ECR_IMAGE"
 
 
-# ==================================================
+# ====================================================
 # WAIT FOR APPLICATION
-# ==================================================
+# ====================================================
 
 echo ""
 echo "Waiting for application startup..."
@@ -658,23 +655,22 @@ echo "Waiting for application startup..."
 sleep 5
 
 
-# ==================================================
-# VERIFY CONTAINER
-# ==================================================
+# ====================================================
+# CONTAINER STATUS
+# ====================================================
 
 echo ""
-echo "Container status:"
+echo "Running containers:"
 
-docker ps \
-    --filter "name=$APP_NAME"
+docker ps
 
 
-# ==================================================
-# APPLICATION HEALTH CHECK
-# ==================================================
+# ====================================================
+# APPLICATION CHECK
+# ====================================================
 
 echo ""
-echo "Checking application..."
+echo "Checking application endpoint..."
 
 curl -f \
     "http://localhost:$APP_PORT/"
@@ -690,17 +686,14 @@ EOF
                         chmod +x /tmp/ec2-deploy.sh
 
 
-                        # ==================================================
-                        # Convert deployment script into SSM JSON
+                        # ====================================================
+                        # CREATE SSM JSON PARAMETERS
                         #
-                        # IMPORTANT:
-                        # We do NOT pass:
+                        # Do NOT use:
                         #
                         # commands=[echo ... | base64 -d ...]
                         #
-                        # directly to AWS CLI.
-                        #
-                        # ==================================================
+                        # ====================================================
 
                         python3 - <<'PY' > /tmp/ssm-parameters.json
 
@@ -721,12 +714,12 @@ PY
 
 
                         echo ""
-                        echo "SSM parameters created."
+                        echo "SSM parameter JSON created."
 
 
-                        # ==================================================
-                        # SEND COMMAND
-                        # ==================================================
+                        # ====================================================
+                        # SEND COMMAND TO EC2
+                        # ====================================================
 
                         COMMAND_ID=$(aws ssm send-command \
                             --instance-ids "$EC2_INSTANCE_ID" \
@@ -743,12 +736,12 @@ PY
                         echo "$COMMAND_ID"
 
 
-                        # ==================================================
-                        # WAIT
-                        # ==================================================
+                        # ====================================================
+                        # WAIT FOR SSM
+                        # ====================================================
 
                         echo ""
-                        echo "Waiting for EC2 deployment..."
+                        echo "Waiting for SSM deployment..."
 
                         aws ssm wait command-executed \
                             --command-id "$COMMAND_ID" \
@@ -756,9 +749,9 @@ PY
                             --region "$AWS_REGION"
 
 
-                        # ==================================================
+                        # ====================================================
                         # GET STATUS
-                        # ==================================================
+                        # ====================================================
 
                         STATUS=$(aws ssm get-command-invocation \
                             --command-id "$COMMAND_ID" \
@@ -773,13 +766,13 @@ PY
                         echo "$STATUS"
 
 
-                        # ==================================================
-                        # OUTPUT
-                        # ==================================================
+                        # ====================================================
+                        # REMOTE OUTPUT
+                        # ====================================================
 
                         echo ""
                         echo "=========================================="
-                        echo "EC2 STANDARD OUTPUT"
+                        echo "REMOTE OUTPUT"
                         echo "=========================================="
 
                         aws ssm get-command-invocation \
@@ -790,9 +783,13 @@ PY
                             --output text
 
 
+                        # ====================================================
+                        # REMOTE ERROR
+                        # ====================================================
+
                         echo ""
                         echo "=========================================="
-                        echo "EC2 STANDARD ERROR"
+                        echo "REMOTE ERROR"
                         echo "=========================================="
 
                         aws ssm get-command-invocation \
@@ -803,9 +800,9 @@ PY
                             --output text
 
 
-                        # ==================================================
-                        # FAIL PIPELINE IF EC2 DEPLOYMENT FAILED
-                        # ==================================================
+                        # ====================================================
+                        # FAIL IF EC2 DEPLOYMENT FAILED
+                        # ====================================================
 
                         if [ "$STATUS" != "Success" ]; then
 
@@ -813,7 +810,6 @@ PY
                             echo "EC2 deployment failed."
 
                             exit 1
-
                         fi
 
 
@@ -826,7 +822,7 @@ PY
 
 
         // ============================================================
-        // 16. FINAL APPLICATION HEALTH CHECK
+        // 16. APPLICATION HEALTH CHECK
         // ============================================================
 
         stage('Application Health Check') {
@@ -845,11 +841,15 @@ PY
                         set -e
 
                         echo "=========================================="
-                        echo "FINAL APPLICATION HEALTH CHECK"
+                        echo "APPLICATION HEALTH CHECK"
                         echo "=========================================="
 
                         export AWS_DEFAULT_REGION="$AWS_REGION"
 
+
+                        # ==================================================
+                        # CREATE HEALTH CHECK JSON
+                        # ==================================================
 
                         cat > /tmp/healthcheck.json <<EOF
 {
@@ -860,10 +860,14 @@ PY
 EOF
 
 
+                        # ==================================================
+                        # SEND HEALTH CHECK
+                        # ==================================================
+
                         COMMAND_ID=$(aws ssm send-command \
                             --instance-ids "$EC2_INSTANCE_ID" \
                             --document-name "AWS-RunShellScript" \
-                            --comment "Application health check build $BUILD_NUMBER" \
+                            --comment "Application health check" \
                             --parameters file:///tmp/healthcheck.json \
                             --region "$AWS_REGION" \
                             --query "Command.CommandId" \
@@ -871,15 +875,23 @@ EOF
 
 
                         echo ""
-                        echo "Health Check Command ID:"
+                        echo "Health check command:"
                         echo "$COMMAND_ID"
 
+
+                        # ==================================================
+                        # WAIT
+                        # ==================================================
 
                         aws ssm wait command-executed \
                             --command-id "$COMMAND_ID" \
                             --instance-id "$EC2_INSTANCE_ID" \
                             --region "$AWS_REGION"
 
+
+                        # ==================================================
+                        # STATUS
+                        # ==================================================
 
                         STATUS=$(aws ssm get-command-invocation \
                             --command-id "$COMMAND_ID" \
@@ -894,6 +906,10 @@ EOF
                         echo "$STATUS"
 
 
+                        # ==================================================
+                        # OUTPUT
+                        # ==================================================
+
                         echo ""
                         echo "Health Check Output:"
 
@@ -904,6 +920,10 @@ EOF
                             --query "StandardOutputContent" \
                             --output text
 
+
+                        # ==================================================
+                        # FAIL IF HEALTH CHECK FAILED
+                        # ==================================================
 
                         if [ "$STATUS" != "Success" ]; then
 
@@ -918,7 +938,6 @@ EOF
                                 --output text
 
                             exit 1
-
                         fi
 
 
@@ -952,7 +971,7 @@ Jenkins
   ↓
 Gitleaks
   ↓
-SonarQube
+SonarQube SAST
   ↓
 NPM Audit
   ↓
@@ -962,7 +981,11 @@ Docker Build
   ↓
 Trivy
   ↓
+AWS
+  ↓
 ECR
+  ↓
+ECR Digest
   ↓
 SSM
   ↓
@@ -973,9 +996,9 @@ Docker Container
 Health Check
 
 APPLICATION DEPLOYED SUCCESSFULLY
+
 ==========================================
 '''
-
         }
 
 
@@ -992,7 +1015,7 @@ Possible areas:
 
 1. Gitleaks
 2. SonarQube
-3. Node.js / npm
+3. npm dependencies
 4. npm audit
 5. Application test
 6. Docker
@@ -1005,7 +1028,6 @@ Possible areas:
 
 ==========================================
 '''
-
         }
 
 
