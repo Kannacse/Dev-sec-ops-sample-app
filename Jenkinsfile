@@ -5,25 +5,31 @@ pipeline {
     environment {
 
         // ============================================================
-        // AWS CONFIGURATION
+        // AWS
         // ============================================================
 
         AWS_REGION = 'us-east-1'
-
         AWS_ACCOUNT_ID = '042775549160'
 
-        // Jenkins credential ID
-        AWS_CREDENTIALS_ID = 'aws-jenkins'
+        // IMPORTANT:
+        // This must exactly match the Jenkins credential ID.
+        AWS_CREDENTIALS_ID = 'aws-hrms-v2-taff'
 
+        // ============================================================
         // ECR
+        // ============================================================
+
         ECR_REGISTRY = '042775549160.dkr.ecr.us-east-1.amazonaws.com'
 
         ECR_REPOSITORY = 'devsecops-sample-app'
 
         ECR_URI = '042775549160.dkr.ecr.us-east-1.amazonaws.com/devsecops-sample-app'
 
+        // ============================================================
         // EC2
-        EC2_INSTANCE_ID = 'i-0e0aebd33e4c8e9a1'
+        // ============================================================
+
+        EC2_INSTANCE_ID = 'i-096fc3c14a9db3ad8'
 
         // ============================================================
         // SONARQUBE
@@ -281,6 +287,7 @@ pipeline {
 
                     echo "Build Number: ${BUILD_NUMBER}"
 
+                    echo ""
                     echo "Building:"
                     echo "${ECR_URI}:${BUILD_NUMBER}"
 
@@ -437,10 +444,10 @@ pipeline {
 
 
         // ============================================================
-        // 13. VERIFY ECR
+        // 13. GET ECR DIGEST
         // ============================================================
 
-        stage('Verify ECR Image') {
+        stage('Get ECR Image Digest') {
 
             steps {
 
@@ -451,23 +458,46 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -e
+                    script {
 
-                        echo "=========================================="
-                        echo "VERIFYING ECR IMAGE"
-                        echo "=========================================="
+                        sh '''
+                            set -e
 
-                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+                            echo "=========================================="
+                            echo "GETTING ECR IMAGE DIGEST"
+                            echo "=========================================="
 
-                        aws ecr list-images \
-                            --repository-name "${ECR_REPOSITORY}" \
-                            --region "${AWS_REGION}" \
-                            --output table
+                            export AWS_DEFAULT_REGION="${AWS_REGION}"
 
-                        echo ""
-                        echo "ECR verification completed."
-                    '''
+                            aws ecr describe-images \
+                                --repository-name "${ECR_REPOSITORY}" \
+                                --image-ids imageTag="${BUILD_NUMBER}" \
+                                --region "${AWS_REGION}" \
+                                --query 'imageDetails[0].imageDigest' \
+                                --output text
+                        '''
+
+                        env.ECR_IMAGE_DIGEST = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "${ECR_REPOSITORY}" \
+                                    --image-ids imageTag="${BUILD_NUMBER}" \
+                                    --region "${AWS_REGION}" \
+                                    --query 'imageDetails[0].imageDigest' \
+                                    --output text
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if (!env.ECR_IMAGE_DIGEST ||
+                            env.ECR_IMAGE_DIGEST == 'None') {
+
+                            error("ECR image digest was not found.")
+                        }
+
+                        echo "ECR Image Digest:"
+                        echo "${env.ECR_IMAGE_DIGEST}"
+                    }
                 }
             }
         }
@@ -529,6 +559,15 @@ pipeline {
 
         // ============================================================
         // 15. DEPLOY TO EC2 THROUGH SSM
+        //
+        // IMPORTANT:
+        // The deployment script is BASE64 encoded before being sent
+        // through SSM.
+        //
+        // This prevents the long ECR image reference from being
+        // accidentally changed/truncated by shell/SSM parsing.
+        //
+        // The EC2 pulls the image by ECR DIGEST.
         // ============================================================
 
         stage('Deploy to EC2 via SSM') {
@@ -556,74 +595,148 @@ pipeline {
                         echo "${EC2_INSTANCE_ID}"
 
                         echo ""
-                        echo "Image:"
-                        echo "${ECR_URI}:${BUILD_NUMBER}"
-
+                        echo "ECR Image:"
+                        echo "${ECR_URI}@${ECR_IMAGE_DIGEST}"
 
                         # ------------------------------------------------
-                        # Create SSM command document
+                        # Create deployment script
                         # ------------------------------------------------
 
-                        cat > /tmp/deploy-commands.json <<EOF
-{
-    "commands": [
-        "set -e",
-        "echo '=========================================='",
-        "echo 'EC2 DEPLOYMENT STARTED'",
-        "echo '=========================================='",
-        "echo 'Checking AWS CLI...'",
-        "aws --version",
-        "echo 'Checking Docker...'",
-        "docker --version",
-        "echo 'Logging into Amazon ECR...'",
-        "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}",
-        "echo 'ECR login successful.'",
-        "echo 'Pulling image from ECR...'",
-        "docker pull ${ECR_URI}:${BUILD_NUMBER}",
-        "echo 'Stopping old application container...'",
-        "docker stop ${APP_NAME} || true",
-        "echo 'Removing old application container...'",
-        "docker rm ${APP_NAME} || true",
-        "echo 'Starting new application container...'",
-        "docker run -d --name ${APP_NAME} --restart unless-stopped -p ${HOST_PORT}:${APP_PORT} ${ECR_URI}:${BUILD_NUMBER}",
-        "echo 'Waiting for application...'",
-        "sleep 5",
-        "echo 'Running containers:'",
-        "docker ps",
-        "echo 'Testing application locally...'",
-        "curl -f http://localhost:${HOST_PORT}/",
-        "echo '=========================================='",
-        "echo 'EC2 DEPLOYMENT SUCCESSFUL'",
-        "echo '=========================================='"
-    ]
-}
+                        cat > /tmp/ec2-deploy.sh <<EOF
+#!/bin/bash
+
+set -e
+
+echo "=========================================="
+echo "EC2 DEPLOYMENT STARTED"
+echo "=========================================="
+
+echo ""
+echo "Checking AWS CLI..."
+aws --version
+
+echo ""
+echo "Checking Docker..."
+docker --version
+
+echo ""
+echo "Checking curl..."
+curl --version | head -n 1
+
+echo ""
+echo "ECR Registry:"
+echo "${ECR_REGISTRY}"
+
+echo ""
+echo "Application:"
+echo "${APP_NAME}"
+
+echo ""
+echo "Image:"
+echo "${ECR_URI}@${ECR_IMAGE_DIGEST}"
+
+echo ""
+echo "Logging into Amazon ECR..."
+
+aws ecr get-login-password \
+    --region "${AWS_REGION}" | \
+docker login \
+    --username AWS \
+    --password-stdin \
+    "${ECR_REGISTRY}"
+
+echo ""
+echo "ECR login successful."
+
+echo ""
+echo "Pulling exact image by digest..."
+
+docker pull \
+    "${ECR_URI}@${ECR_IMAGE_DIGEST}"
+
+echo ""
+echo "Stopping existing application container..."
+
+docker stop "${APP_NAME}" || true
+
+echo ""
+echo "Removing existing application container..."
+
+docker rm "${APP_NAME}" || true
+
+echo ""
+echo "Starting new application container..."
+
+docker run -d \
+    --name "${APP_NAME}" \
+    --restart unless-stopped \
+    --publish "${HOST_PORT}:${APP_PORT}" \
+    "${ECR_URI}@${ECR_IMAGE_DIGEST}"
+
+echo ""
+echo "Waiting for application startup..."
+
+sleep 5
+
+echo ""
+echo "Running containers:"
+
+docker ps
+
+echo ""
+echo "Checking application endpoint..."
+
+curl -f \
+    "http://localhost:${HOST_PORT}/"
+
+echo ""
+echo "=========================================="
+echo "EC2 DEPLOYMENT SUCCESSFUL"
+echo "=========================================="
 EOF
 
+                        # ------------------------------------------------
+                        # Encode script so SSM cannot mangle it
+                        # ------------------------------------------------
+
+                        DEPLOY_SCRIPT_B64=$(base64 -w 0 /tmp/ec2-deploy.sh)
+
+                        echo ""
+                        echo "Deployment script encoded successfully."
+
+                        # ------------------------------------------------
+                        # Create ONE short SSM command
+                        # ------------------------------------------------
+
+                        SSM_COMMAND="echo ${DEPLOY_SCRIPT_B64} | base64 -d > /tmp/ec2-deploy.sh && chmod +x /tmp/ec2-deploy.sh && /tmp/ec2-deploy.sh"
+
+                        # ------------------------------------------------
+                        # Send command to EC2
+                        # ------------------------------------------------
 
                         echo ""
                         echo "Sending deployment command to EC2..."
-
 
                         COMMAND_ID=$(aws ssm send-command \
                             --instance-ids "${EC2_INSTANCE_ID}" \
                             --document-name "AWS-RunShellScript" \
                             --comment "DevSecOps deployment build ${BUILD_NUMBER}" \
-                            --parameters file:///tmp/deploy-commands.json \
+                            --parameters "commands=[\"${SSM_COMMAND}\"]" \
                             --region "${AWS_REGION}" \
                             --query 'Command.CommandId' \
                             --output text)
-
 
                         echo ""
                         echo "SSM Command ID:"
                         echo "${COMMAND_ID}"
 
+                        if [ -z "${COMMAND_ID}" ] ||
+                           [ "${COMMAND_ID}" = "None" ]; then
 
-                        if [ -z "${COMMAND_ID}" ] || [ "${COMMAND_ID}" = "None" ]; then
                             echo "ERROR: Failed to create SSM command."
                             exit 1
-                        fi
 
+                        fi
 
                         # ------------------------------------------------
                         # Wait for deployment
@@ -632,11 +745,9 @@ EOF
                         echo ""
                         echo "Waiting for EC2 deployment..."
 
-
                         DEPLOYMENT_STATUS="Pending"
 
-
-                        for i in $(seq 1 36); do
+                        for i in $(seq 1 60); do
 
                             DEPLOYMENT_STATUS=$(aws ssm get-command-invocation \
                                 --command-id "${COMMAND_ID}" \
@@ -645,10 +756,8 @@ EOF
                                 --query 'Status' \
                                 --output text 2>/dev/null || echo "Pending")
 
-
-                            echo "Attempt ${i}/36"
+                            echo "Attempt ${i}/60"
                             echo "Status: ${DEPLOYMENT_STATUS}"
-
 
                             if [ "${DEPLOYMENT_STATUS}" = "Success" ]; then
 
@@ -658,7 +767,7 @@ EOF
                                 echo "=========================================="
 
                                 echo ""
-                                echo "Output:"
+                                echo "EC2 Output:"
                                 echo "------------------------------------------"
 
                                 aws ssm get-command-invocation \
@@ -672,14 +781,168 @@ EOF
 
                             fi
 
-
-                            if [ "${DEPLOYMENT_STATUS}" = "Failed" ] || \
-                               [ "${DEPLOYMENT_STATUS}" = "Cancelled" ] || \
+                            if [ "${DEPLOYMENT_STATUS}" = "Failed" ] ||
+                               [ "${DEPLOYMENT_STATUS}" = "Cancelled" ] ||
                                [ "${DEPLOYMENT_STATUS}" = "TimedOut" ]; then
 
                                 echo ""
                                 echo "=========================================="
                                 echo "EC2 DEPLOYMENT FAILED"
+                                echo "=========================================="
+
+                                echo ""
+                                echo "Standard Output:"
+                                echo "------------------------------------------"
+
+                                aws ssm get-command-invocation \
+                                    --command-id "${COMMAND_ID}" \
+                                    --instance-id "${EC2_INSTANCE_ID}" \
+                                    --region "${AWS_REGION}" \
+                                    --query 'StandardOutputContent' \
+                                    --output text || true
+
+                                echo ""
+                                echo "Standard Error:"
+                                echo "------------------------------------------"
+
+                                aws ssm get-command-invocation \
+                                    --command-id "${COMMAND_ID}" \
+                                    --instance-id "${EC2_INSTANCE_ID}" \
+                                    --region "${AWS_REGION}" \
+                                    --query 'StandardErrorContent' \
+                                    --output text || true
+
+                                exit 1
+
+                            fi
+
+                            sleep 5
+
+                        done
+
+                        if [ "${DEPLOYMENT_STATUS}" != "Success" ]; then
+
+                            echo ""
+                            echo "ERROR: EC2 deployment timed out."
+
+                            exit 1
+
+                        fi
+
+                        rm -f /tmp/ec2-deploy.sh
+                    '''
+                }
+            }
+        }
+
+
+        // ============================================================
+        // 16. FINAL APPLICATION HEALTH CHECK
+        // ============================================================
+
+        stage('Application Health Check') {
+
+            steps {
+
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}",
+                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=========================================="
+                        echo "FINAL APPLICATION HEALTH CHECK"
+                        echo "=========================================="
+
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+                        cat > /tmp/ec2-health.sh <<EOF
+#!/bin/bash
+
+set -e
+
+echo "Checking application container..."
+
+docker ps \
+    --filter "name=${APP_NAME}" \
+    --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
+
+echo ""
+echo "Checking application endpoint..."
+
+curl -f \
+    "http://localhost:${HOST_PORT}/"
+
+echo ""
+echo "Application health check passed."
+EOF
+
+                        HEALTH_SCRIPT_B64=$(base64 -w 0 /tmp/ec2-health.sh)
+
+                        SSM_HEALTH_COMMAND="echo ${HEALTH_SCRIPT_B64} | base64 -d > /tmp/ec2-health.sh && chmod +x /tmp/ec2-health.sh && /tmp/ec2-health.sh"
+
+                        echo ""
+                        echo "Sending health check to EC2..."
+
+                        COMMAND_ID=$(aws ssm send-command \
+                            --instance-ids "${EC2_INSTANCE_ID}" \
+                            --document-name "AWS-RunShellScript" \
+                            --comment "Application health check build ${BUILD_NUMBER}" \
+                            --parameters "commands=[\"${SSM_HEALTH_COMMAND}\"]" \
+                            --region "${AWS_REGION}" \
+                            --query 'Command.CommandId' \
+                            --output text)
+
+                        echo ""
+                        echo "Health Check Command ID:"
+                        echo "${COMMAND_ID}"
+
+                        HEALTH_STATUS="Pending"
+
+                        for i in $(seq 1 36); do
+
+                            HEALTH_STATUS=$(aws ssm get-command-invocation \
+                                --command-id "${COMMAND_ID}" \
+                                --instance-id "${EC2_INSTANCE_ID}" \
+                                --region "${AWS_REGION}" \
+                                --query 'Status' \
+                                --output text 2>/dev/null || echo "Pending")
+
+                            echo "Health check ${i}/36: ${HEALTH_STATUS}"
+
+                            if [ "${HEALTH_STATUS}" = "Success" ]; then
+
+                                echo ""
+                                echo "Health Check Output:"
+                                echo "------------------------------------------"
+
+                                aws ssm get-command-invocation \
+                                    --command-id "${COMMAND_ID}" \
+                                    --instance-id "${EC2_INSTANCE_ID}" \
+                                    --region "${AWS_REGION}" \
+                                    --query 'StandardOutputContent' \
+                                    --output text
+
+                                echo ""
+                                echo "=========================================="
+                                echo "APPLICATION HEALTH CHECK PASSED"
+                                echo "=========================================="
+
+                                break
+
+                            fi
+
+                            if [ "${HEALTH_STATUS}" = "Failed" ] ||
+                               [ "${HEALTH_STATUS}" = "Cancelled" ] ||
+                               [ "${HEALTH_STATUS}" = "TimedOut" ]; then
+
+                                echo ""
+                                echo "=========================================="
+                                echo "APPLICATION HEALTH CHECK FAILED"
                                 echo "=========================================="
 
                                 echo ""
@@ -704,160 +967,11 @@ EOF
 
                             fi
 
-
                             sleep 5
 
                         done
 
-
-                        if [ "${DEPLOYMENT_STATUS}" != "Success" ]; then
-
-                            echo ""
-                            echo "ERROR: Deployment timed out."
-
-                            exit 1
-
-                        fi
-
-
-                        rm -f /tmp/deploy-commands.json
-                    '''
-                }
-            }
-        }
-
-
-        // ============================================================
-        // 16. APPLICATION HEALTH CHECK
-        // ============================================================
-
-        stage('Application Health Check') {
-
-            steps {
-
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: "${AWS_CREDENTIALS_ID}",
-                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=========================================="
-                        echo "APPLICATION HEALTH CHECK"
-                        echo "=========================================="
-
-                        export AWS_DEFAULT_REGION="${AWS_REGION}"
-
-
-                        cat > /tmp/health-check.json <<EOF
-{
-    "commands": [
-        "echo 'Checking application container...'",
-        "docker ps --filter name=${APP_NAME}",
-        "echo 'Checking application endpoint...'",
-        "curl -f http://localhost:${HOST_PORT}/",
-        "echo 'Application health check passed.'"
-    ]
-}
-EOF
-
-
-                        COMMAND_ID=$(aws ssm send-command \
-                            --instance-ids "${EC2_INSTANCE_ID}" \
-                            --document-name "AWS-RunShellScript" \
-                            --comment "Health check build ${BUILD_NUMBER}" \
-                            --parameters file:///tmp/health-check.json \
-                            --region "${AWS_REGION}" \
-                            --query 'Command.CommandId' \
-                            --output text)
-
-
-                        echo ""
-                        echo "Health Check Command ID:"
-                        echo "${COMMAND_ID}"
-
-
-                        HEALTH_STATUS="Pending"
-
-
-                        for i in $(seq 1 24); do
-
-                            HEALTH_STATUS=$(aws ssm get-command-invocation \
-                                --command-id "${COMMAND_ID}" \
-                                --instance-id "${EC2_INSTANCE_ID}" \
-                                --region "${AWS_REGION}" \
-                                --query 'Status' \
-                                --output text 2>/dev/null || echo "Pending")
-
-
-                            echo "Health check ${i}/24: ${HEALTH_STATUS}"
-
-
-                            if [ "${HEALTH_STATUS}" = "Success" ]; then
-
-                                echo ""
-                                echo "Health Check Output:"
-                                echo "------------------------------------------"
-
-                                aws ssm get-command-invocation \
-                                    --command-id "${COMMAND_ID}" \
-                                    --instance-id "${EC2_INSTANCE_ID}" \
-                                    --region "${AWS_REGION}" \
-                                    --query 'StandardOutputContent' \
-                                    --output text
-
-                                echo ""
-                                echo "=========================================="
-                                echo "APPLICATION HEALTH CHECK PASSED"
-                                echo "=========================================="
-
-                                break
-
-                            fi
-
-
-                            if [ "${HEALTH_STATUS}" = "Failed" ] || \
-                               [ "${HEALTH_STATUS}" = "Cancelled" ] || \
-                               [ "${HEALTH_STATUS}" = "TimedOut" ]; then
-
-                                echo ""
-                                echo "=========================================="
-                                echo "APPLICATION HEALTH CHECK FAILED"
-                                echo "=========================================="
-
-                                echo ""
-                                echo "Output:"
-                                aws ssm get-command-invocation \
-                                    --command-id "${COMMAND_ID}" \
-                                    --instance-id "${EC2_INSTANCE_ID}" \
-                                    --region "${AWS_REGION}" \
-                                    --query 'StandardOutputContent' \
-                                    --output text || true
-
-                                echo ""
-                                echo "Error:"
-                                aws ssm get-command-invocation \
-                                    --command-id "${COMMAND_ID}" \
-                                    --instance-id "${EC2_INSTANCE_ID}" \
-                                    --region "${AWS_REGION}" \
-                                    --query 'StandardErrorContent' \
-                                    --output text || true
-
-                                exit 1
-
-                            fi
-
-
-                            sleep 5
-
-                        done
-
-
-                        rm -f /tmp/health-check.json
-
+                        rm -f /tmp/ec2-health.sh
 
                         if [ "${HEALTH_STATUS}" != "Success" ]; then
 
@@ -875,7 +989,7 @@ EOF
 
 
     // ================================================================
-    // POST
+    // POST ACTIONS
     // ================================================================
 
     post {
@@ -890,13 +1004,13 @@ DEVSECOPS PIPELINE SUCCESS
 GitHub
    |
    v
-Jenkins
+Jenkins - Local Ubuntu
    |
    +-- Gitleaks
    |
-   +-- SonarQube
+   +-- SonarQube SAST
    |
-   +-- NPM Audit
+   +-- NPM Audit WARNING
    |
    +-- Application Test
    |
@@ -906,20 +1020,24 @@ Jenkins
    |
    +-- Amazon ECR
    |
+   +-- ECR Image Digest
+   |
    +-- AWS SSM
    |
    +-- EC2
    |
    +-- Docker Container
    |
-   +-- Health Check
+   +-- Application Health Check
    |
    v
 APPLICATION DEPLOYED
 
-Expected URL:
+EC2:
+i-096fc3c14a9db3ad8
 
-http://18.209.29.219:3000
+Application:
+Port 3000
 '''
         }
 
@@ -932,6 +1050,20 @@ DEVSECOPS PIPELINE FAILED
 ==========================================
 
 Check the FIRST failed stage in Console Output.
+
+Possible areas:
+
+1. Gitleaks
+2. SonarQube
+3. npm dependencies
+4. Application test
+5. Docker
+6. Trivy
+7. AWS credentials
+8. ECR
+9. SSM
+10. EC2 Docker deployment
+11. Application health check
 '''
         }
 
