@@ -65,6 +65,7 @@ pipeline {
         stage('Checkout') {
 
             steps {
+
                 checkout scm
             }
         }
@@ -379,7 +380,6 @@ pipeline {
                     echo "Building image..."
 
                     docker build \
-                        --build-arg PORT="$EC2_PORT" \
                         -t "$ECR_URI:$BUILD_NUMBER" \
                         -t "$ECR_URI:latest" \
                         .
@@ -560,13 +560,13 @@ pipeline {
                         echo "=========================================="
 
                         echo ""
-                        echo "Pushing build image:"
+                        echo "Pushing build image..."
 
                         docker push \
                             "$ECR_URI:$BUILD_NUMBER"
 
                         echo ""
-                        echo "Pushing latest image:"
+                        echo "Pushing latest image..."
 
                         docker push \
                             "$ECR_URI:latest"
@@ -746,7 +746,7 @@ docker pull \
     ${ECR_URI}:${BUILD_NUMBER}
 
 echo ""
-echo "Stopping existing container..."
+echo "Stopping old container..."
 
 docker rm -f ${DOCKER_CONTAINER_NAME} 2>/dev/null || true
 
@@ -772,7 +772,7 @@ docker ps \
     --filter "name=${DOCKER_CONTAINER_NAME}"
 
 echo ""
-echo "Checking application..."
+echo "Checking application locally..."
 
 curl -fsS \
     http://127.0.0.1:${EC2_PORT}/
@@ -936,13 +936,32 @@ PY
                         echo "=========================================="
 
                         echo ""
+                        echo "Creating health-check parameters..."
+
+                        python3 > /tmp/healthcheck-parameters.json <<PY
+import json
+
+print(json.dumps({
+    "commands": [
+        "curl -fsS http://127.0.0.1:${EC2_PORT}/"
+    ]
+}))
+PY
+
+                        echo ""
+                        echo "Health-check parameters:"
+
+                        python3 -m json.tool \
+                            /tmp/healthcheck-parameters.json
+
+                        echo ""
                         echo "Running health check through SSM..."
 
                         HEALTH_COMMAND_ID=$(aws ssm send-command \
                             --instance-ids "$EC2_INSTANCE_ID" \
                             --document-name "AWS-RunShellScript" \
                             --comment "Application health check - build $BUILD_NUMBER" \
-                            --parameters "{\"commands\":[\"curl -fsS http://127.0.0.1:$EC2_PORT/\"]}" \
+                            --parameters file:///tmp/healthcheck-parameters.json \
                             --region "$AWS_REGION" \
                             --query 'Command.CommandId' \
                             --output text)
@@ -1018,13 +1037,18 @@ PY
 
                             echo ""
                             echo "ERROR: Application health check failed."
+
                             exit 1
 
                         fi
 
                         echo ""
-                        echo "Application health check passed."
-                        echo "Application is running successfully on EC2."
+                        echo "=========================================="
+                        echo "APPLICATION HEALTH CHECK PASSED"
+                        echo "=========================================="
+
+                        echo ""
+                        echo "Application is healthy on EC2."
                     '''
                 }
             }
@@ -1044,6 +1068,7 @@ PY
                 rm -f \
                     /tmp/ec2-deploy.sh \
                     /tmp/ssm-parameters.json \
+                    /tmp/healthcheck-parameters.json \
                     /tmp/healthcheck.json \
                     2>/dev/null || true
             '''
