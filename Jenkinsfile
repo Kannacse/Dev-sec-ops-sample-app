@@ -38,7 +38,7 @@ pipeline {
         SONARQUBE_SERVER = 'sonarqube-dev-sec'
 
         // KEEP YOUR EXISTING SONAR TOKEN CREDENTIAL ID
-        SONAR_TOKEN_CREDENTIAL_ID = 'YOUR_EXISTING_SONAR_TOKEN_CREDENTIAL_ID'
+        SONAR_TOKEN_CREDENTIAL_ID = 'sonarqube-jenkins-token'
     }
 
     stages {
