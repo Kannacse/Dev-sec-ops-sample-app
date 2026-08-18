@@ -52,7 +52,6 @@ pipeline {
         APP_NAME = 'devsecops-sample-app'
 
         DOCKER_CONTAINER_NAME = 'devsecops-sample-app'
-
     }
 
 
@@ -66,9 +65,7 @@ pipeline {
         stage('Checkout') {
 
             steps {
-
                 checkout scm
-
             }
         }
 
@@ -749,7 +746,7 @@ docker pull \
     ${ECR_URI}:${BUILD_NUMBER}
 
 echo ""
-echo "Stopping old container..."
+echo "Stopping existing container..."
 
 docker rm -f ${DOCKER_CONTAINER_NAME} 2>/dev/null || true
 
@@ -764,12 +761,12 @@ docker run -d \
     ${ECR_URI}:${BUILD_NUMBER}
 
 echo ""
-echo "Waiting for container..."
+echo "Waiting for application..."
 
 sleep 5
 
 echo ""
-echo "Checking container status..."
+echo "Checking container..."
 
 docker ps \
     --filter "name=${DOCKER_CONTAINER_NAME}"
@@ -794,13 +791,39 @@ EOF
                         DEPLOY_SCRIPT_B64=$(base64 -w0 /tmp/ec2-deploy.sh)
 
                         echo ""
+                        echo "Creating SSM parameter JSON..."
+
+                        python3 - "$DEPLOY_SCRIPT_B64" > /tmp/ssm-parameters.json <<'PY'
+import json
+import sys
+
+script_b64 = sys.argv[1]
+
+commands = [
+    f"echo {script_b64} | base64 -d > /tmp/ec2-deploy.sh",
+    "chmod +x /tmp/ec2-deploy.sh",
+    "sudo /tmp/ec2-deploy.sh"
+]
+
+print(json.dumps({
+    "commands": commands
+}))
+PY
+
+                        echo ""
+                        echo "Validating SSM parameter JSON..."
+
+                        python3 -m json.tool \
+                            /tmp/ssm-parameters.json
+
+                        echo ""
                         echo "Sending deployment command to EC2..."
 
                         SSM_COMMAND_ID=$(aws ssm send-command \
                             --instance-ids "$EC2_INSTANCE_ID" \
                             --document-name "AWS-RunShellScript" \
                             --comment "DevSecOps deployment - build $BUILD_NUMBER" \
-                            --parameters "{\"commands\":[\"echo $DEPLOY_SCRIPT_B64 | base64 -d > /tmp/ec2-deploy.sh\",\"chmod +x /tmp/ec2-deploy.sh\",\"sudo /tmp/ec2-deploy.sh\"]}" \
+                            --parameters file:///tmp/ssm-parameters.json \
                             --region "$AWS_REGION" \
                             --query 'Command.CommandId' \
                             --output text)
@@ -808,6 +831,8 @@ EOF
                         echo ""
                         echo "SSM Command ID:"
                         echo "$SSM_COMMAND_ID"
+
+                        test -n "$SSM_COMMAND_ID"
 
                         echo ""
                         echo "Waiting for deployment..."
@@ -846,12 +871,29 @@ EOF
                         echo "SSM DEPLOYMENT RESULT"
                         echo "=========================================="
 
+                        echo ""
+                        echo "Status:"
+                        echo "$COMMAND_STATUS"
+
+                        echo ""
+                        echo "Command output:"
+
                         aws ssm get-command-invocation \
                             --command-id "$SSM_COMMAND_ID" \
                             --instance-id "$EC2_INSTANCE_ID" \
                             --region "$AWS_REGION" \
-                            --query '{Status:Status,StandardOutput:StandardOutputContent,StandardError:StandardErrorContent}' \
-                            --output json
+                            --query 'StandardOutputContent' \
+                            --output text
+
+                        echo ""
+                        echo "Command error output:"
+
+                        aws ssm get-command-invocation \
+                            --command-id "$SSM_COMMAND_ID" \
+                            --instance-id "$EC2_INSTANCE_ID" \
+                            --region "$AWS_REGION" \
+                            --query 'StandardErrorContent' \
+                            --output text
 
                         if [ "$COMMAND_STATUS" != "Success" ]; then
 
@@ -862,7 +904,9 @@ EOF
                         fi
 
                         echo ""
-                        echo "EC2 deployment completed successfully."
+                        echo "=========================================="
+                        echo "EC2 DEPLOYMENT SUCCESSFUL"
+                        echo "=========================================="
                     '''
                 }
             }
@@ -907,6 +951,8 @@ EOF
                         echo "Health Check Command ID:"
                         echo "$HEALTH_COMMAND_ID"
 
+                        test -n "$HEALTH_COMMAND_ID"
+
                         echo ""
                         echo "Waiting for health check..."
 
@@ -944,12 +990,29 @@ EOF
                         echo "HEALTH CHECK RESULT"
                         echo "=========================================="
 
+                        echo ""
+                        echo "Status:"
+                        echo "$HEALTH_STATUS"
+
+                        echo ""
+                        echo "Application output:"
+
                         aws ssm get-command-invocation \
                             --command-id "$HEALTH_COMMAND_ID" \
                             --instance-id "$EC2_INSTANCE_ID" \
                             --region "$AWS_REGION" \
-                            --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}' \
-                            --output json
+                            --query 'StandardOutputContent' \
+                            --output text
+
+                        echo ""
+                        echo "Application error output:"
+
+                        aws ssm get-command-invocation \
+                            --command-id "$HEALTH_COMMAND_ID" \
+                            --instance-id "$EC2_INSTANCE_ID" \
+                            --region "$AWS_REGION" \
+                            --query 'StandardErrorContent' \
+                            --output text
 
                         if [ "$HEALTH_STATUS" != "Success" ]; then
 
@@ -966,7 +1029,6 @@ EOF
                 }
             }
         }
-
     }
 
 
