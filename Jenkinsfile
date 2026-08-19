@@ -3,52 +3,89 @@ import groovy.json.JsonOutput
 /* ================================================================
  * STAGE NOTIFICATION HELPERS
  * ================================================================ */
+
 def getStageOutput(String marker) {
+
     try {
+
         def lines = currentBuild.rawBuild.getLog(1000000)
+
         int start = -1
 
         for (int i = lines.size() - 1; i >= 0; i--) {
+
             if (lines[i].contains(marker)) {
+
                 start = i
                 break
             }
         }
 
         if (start >= 0) {
-            return lines.subList(start, lines.size()).join("\n")
+
+            return lines
+                .subList(start, lines.size())
+                .join("\n")
         }
 
         return "Stage output marker not found: ${marker}"
+
     } catch (Exception e) {
+
         return "Unable to capture stage output: ${e.getMessage()}"
     }
 }
 
-def notifyStage(String stageName, String stageStatus, String stageMarker) {
+
+def notifyStage(
+    String stageName,
+    String stageStatus,
+    String stageMarker
+) {
+
     try {
-        def stageOutput = getStageOutput(stageMarker)
+
+        def stageOutput =
+            getStageOutput(stageMarker)
+
 
         def payload = [
+
             notification_type: "STAGE",
-            status           : stageStatus,
-            job              : env.JOB_NAME,
-            build            : env.BUILD_NUMBER,
-            build_url        : env.BUILD_URL,
-            stage            : stageName,
-            stage_output     : stageOutput
+
+            status: stageStatus,
+
+            job: env.JOB_NAME,
+
+            build: env.BUILD_NUMBER,
+
+            build_url: env.BUILD_URL,
+
+            stage: stageName,
+
+            stage_output: stageOutput
         ]
 
+
         writeFile(
+
             file: "/tmp/stage-notification.json",
+
             text: JsonOutput.toJson(payload)
         )
 
+
         withCredentials([
-            [$class: 'AmazonWebServicesCredentialsBinding',
-             credentialsId: "${env.AWS_CREDENTIALS_ID}"]
+            [
+                $class:
+                    'AmazonWebServicesCredentialsBinding',
+
+                credentialsId:
+                    "${env.AWS_CREDENTIALS_ID}"
+            ]
         ]) {
-            sh ''''''
+
+            sh '''
                 set -e
 
                 aws lambda invoke \
@@ -59,22 +96,49 @@ def notifyStage(String stageName, String stageStatus, String stageMarker) {
                     /tmp/stage-notification-response.json
 
                 echo ""
+
                 echo "Lambda stage notification response:"
+
                 cat /tmp/stage-notification-response.json
-            ''''''
+            '''
         }
 
-        echo "Stage notification sent successfully: ${stageName} - ${stageStatus}"
+
+        echo ""
+
+        echo "Stage notification sent successfully:"
+
+        echo "${stageName} - ${stageStatus}"
+
+
     } catch (Exception e) {
-        echo "WARNING: Stage notification failed for ${stageName}."
+
+        echo ""
+
+        echo "WARNING: Stage notification failed."
+
+        echo "Stage: ${stageName}"
+
         echo "Notification error: ${e.getMessage()}"
-        // Notification failure must never fail the actual pipeline.
+
+        // Notification failure must never fail
+        // the actual DevSecOps pipeline.
+
     } finally {
-        sh ''''''
-            rm -f /tmp/stage-notification.json /tmp/stage-notification-response.json 2>/dev/null || true
-        ''''''
+
+        sh '''
+            rm -f \
+                /tmp/stage-notification.json \
+                /tmp/stage-notification-response.json \
+                2>/dev/null || true
+        '''
     }
 }
+
+
+pipeline {
+
+    agent any
 
 pipeline {
 
