@@ -1,5 +1,74 @@
 pipeline {
 
+    def notifyStage(String stageName, String stageStatus, String stageOutput) {
+
+    echo ""
+    echo "=========================================="
+    echo "STAGE NOTIFICATION"
+    echo "=========================================="
+
+    echo "Stage: ${stageName}"
+    echo "Status: ${stageStatus}"
+
+    try {
+
+        def payload = [
+            notification_type: "STAGE",
+            status           : stageStatus,
+            job              : env.JOB_NAME,
+            build            : env.BUILD_NUMBER,
+            build_url        : env.BUILD_URL,
+            stage            : stageName,
+            stage_output     : stageOutput
+        ]
+
+        writeFile(
+            file: "/tmp/stage-notification.json",
+            text: groovy.json.JsonOutput.toJson(payload)
+        )
+
+        withCredentials([
+            [
+                $class: 'AmazonWebServicesCredentialsBinding',
+                credentialsId: "${AWS_CREDENTIALS_ID}"
+            ]
+        ]) {
+
+            sh '''
+                set -e
+
+                aws lambda invoke \
+                    --function-name devsecops-pipeline-notification \
+                    --region "${AWS_REGION}" \
+                    --cli-binary-format raw-in-base64-out \
+                    --payload fileb:///tmp/stage-notification.json \
+                    /tmp/stage-notification-response.json
+
+                echo ""
+                echo "Lambda stage notification response:"
+                cat /tmp/stage-notification-response.json
+            '''
+        }
+
+        echo ""
+        echo "Stage notification sent successfully."
+
+    } catch (Exception e) {
+
+        echo ""
+        echo "WARNING: Stage notification failed."
+        echo "Notification error: ${e.getMessage()}"
+
+        // Notification failure must NOT fail the pipeline.
+    }
+
+    sh '''
+        rm -f \
+            /tmp/stage-notification.json \
+            /tmp/stage-notification-response.json \
+            2>/dev/null || true
+    '''
+    }
     agent any
 
     options {
