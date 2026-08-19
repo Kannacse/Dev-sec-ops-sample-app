@@ -1,147 +1,6 @@
-import groovy.json.JsonOutput
-
-/* ================================================================
- * STAGE NOTIFICATION HELPERS
- * ================================================================ */
-
-def getStageOutput(String marker) {
-
-    try {
-
-        def lines = currentBuild.rawBuild.getLog(1000000)
-
-        int start = -1
-
-        for (int i = lines.size() - 1; i >= 0; i--) {
-
-            if (lines[i].contains(marker)) {
-
-                start = i
-                break
-            }
-        }
-
-        if (start >= 0) {
-
-            return lines
-                .subList(start, lines.size())
-                .join("\n")
-        }
-
-        return "Stage output marker not found: ${marker}"
-
-    } catch (Exception e) {
-
-        return "Unable to capture stage output: ${e.getMessage()}"
-    }
-}
-
-
-def notifyStage(
-    String stageName,
-    String stageStatus,
-    String stageMarker
-) {
-
-    try {
-
-        def stageOutput =
-            getStageOutput(stageMarker)
-
-
-        def payload = [
-
-            notification_type: "STAGE",
-
-            status: stageStatus,
-
-            job: env.JOB_NAME,
-
-            build: env.BUILD_NUMBER,
-
-            build_url: env.BUILD_URL,
-
-            stage: stageName,
-
-            stage_output: stageOutput
-        ]
-
-
-        writeFile(
-
-            file: "/tmp/stage-notification.json",
-
-            text: JsonOutput.toJson(payload)
-        )
-
-
-        withCredentials([
-            [
-                $class:
-                    'AmazonWebServicesCredentialsBinding',
-
-                credentialsId:
-                    "${env.AWS_CREDENTIALS_ID}"
-            ]
-        ]) {
-
-            sh '''
-                set -e
-
-                aws lambda invoke \
-                    --function-name devsecops-pipeline-notification \
-                    --region "${AWS_REGION}" \
-                    --cli-binary-format raw-in-base64-out \
-                    --payload fileb:///tmp/stage-notification.json \
-                    /tmp/stage-notification-response.json
-
-                echo ""
-
-                echo "Lambda stage notification response:"
-
-                cat /tmp/stage-notification-response.json
-            '''
-        }
-
-
-        echo ""
-
-        echo "Stage notification sent successfully:"
-
-        echo "${stageName} - ${stageStatus}"
-
-
-    } catch (Exception e) {
-
-        echo ""
-
-        echo "WARNING: Stage notification failed."
-
-        echo "Stage: ${stageName}"
-
-        echo "Notification error: ${e.getMessage()}"
-
-        // Notification failure must never fail
-        // the actual DevSecOps pipeline.
-
-    } finally {
-
-        sh '''
-            rm -f \
-                /tmp/stage-notification.json \
-                /tmp/stage-notification-response.json \
-                2>/dev/null || true
-        '''
-    }
-}
-
-
 pipeline {
 
     agent any
-
-pipeline {
-
 
     options {
         skipDefaultCheckout(true)
@@ -209,29 +68,6 @@ pipeline {
 
                 checkout scm
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Checkout",
-                            "SUCCESS",
-                            "CHECKOUT"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Checkout",
-                            "FAILURE",
-                            "CHECKOUT"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -272,29 +108,6 @@ pipeline {
                     echo "Source verification successful."
                 '''
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Verify Source",
-                            "SUCCESS",
-                            "VERIFYING APPLICATION SOURCE"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Verify Source",
-                            "FAILURE",
-                            "VERIFYING APPLICATION SOURCE"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -321,29 +134,6 @@ pipeline {
                     echo "Gitleaks scan passed."
                     echo "No secrets detected."
                 '''
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Secret Scan - Gitleaks",
-                            "SUCCESS",
-                            "GITLEAKS SECRET SCAN"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Secret Scan - Gitleaks",
-                            "FAILURE",
-                            "GITLEAKS SECRET SCAN"
-                        )
-                    }
-                }
             }
         }
 
@@ -379,29 +169,6 @@ pipeline {
                         echo ""
                         echo "SonarQube connection successful."
                     '''
-                }
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "SonarQube Connection Test",
-                            "SUCCESS",
-                            "SONARQUBE CONNECTION TEST"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "SonarQube Connection Test",
-                            "FAILURE",
-                            "SONARQUBE CONNECTION TEST"
-                        )
-                    }
                 }
             }
         }
@@ -451,29 +218,6 @@ pipeline {
                     }
                 }
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "SAST - SonarQube",
-                            "SUCCESS",
-                            "SONARQUBE SAST SCAN"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "SAST - SonarQube",
-                            "FAILURE",
-                            "SONARQUBE SAST SCAN"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -508,29 +252,6 @@ pipeline {
                     echo ""
                     echo "Dependencies installed successfully."
                 '''
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Install Dependencies",
-                            "SUCCESS",
-                            "INSTALL NODE.JS DEPENDENCIES"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Install Dependencies",
-                            "FAILURE",
-                            "INSTALL NODE.JS DEPENDENCIES"
-                        )
-                    }
-                }
             }
         }
 
@@ -579,29 +300,6 @@ pipeline {
                     echo ""
                     echo "Dependency audit stage completed."
                 '''
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Dependency Audit",
-                            "SUCCESS",
-                            "NPM DEPENDENCY AUDIT"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Dependency Audit",
-                            "FAILURE",
-                            "NPM DEPENDENCY AUDIT"
-                        )
-                    }
-                }
             }
         }
 
@@ -656,29 +354,6 @@ pipeline {
                     echo "Application test stage completed."
                 '''
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Application Test",
-                            "SUCCESS",
-                            "APPLICATION TEST"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Application Test",
-                            "FAILURE",
-                            "APPLICATION TEST"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -717,29 +392,6 @@ pipeline {
 
                     docker images | grep "$ECR_REPOSITORY" || true
                 '''
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Docker Build",
-                            "SUCCESS",
-                            "DOCKER IMAGE BUILD"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Docker Build",
-                            "FAILURE",
-                            "DOCKER IMAGE BUILD"
-                        )
-                    }
-                }
             }
         }
 
@@ -802,29 +454,6 @@ pipeline {
                     echo "Trivy stage completed successfully."
                 '''
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Container Scan - Trivy",
-                            "SUCCESS",
-                            "TRIVY CONTAINER SECURITY SCAN"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Container Scan - Trivy",
-                            "FAILURE",
-                            "TRIVY CONTAINER SECURITY SCAN"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -868,29 +497,6 @@ pipeline {
                     '''
                 }
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "AWS Connection Test",
-                            "SUCCESS",
-                            "AWS CONNECTION TEST"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "AWS Connection Test",
-                            "FAILURE",
-                            "AWS CONNECTION TEST"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -926,29 +532,6 @@ pipeline {
                         echo ""
                         echo "ECR login successful."
                     '''
-                }
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "ECR Login",
-                            "SUCCESS",
-                            "ECR LOGIN"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "ECR Login",
-                            "FAILURE",
-                            "ECR LOGIN"
-                        )
-                    }
                 }
             }
         }
@@ -993,29 +576,6 @@ pipeline {
                     '''
                 }
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Push Image to ECR",
-                            "SUCCESS",
-                            "PUSH IMAGE TO ECR"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Push Image to ECR",
-                            "FAILURE",
-                            "PUSH IMAGE TO ECR"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -1058,29 +618,6 @@ pipeline {
                         echo ""
                         echo "ECR image digest retrieved successfully."
                     '''
-                }
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Get ECR Image Digest",
-                            "SUCCESS",
-                            "GET ECR IMAGE DIGEST"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Get ECR Image Digest",
-                            "FAILURE",
-                            "GET ECR IMAGE DIGEST"
-                        )
-                    }
                 }
             }
         }
@@ -1153,29 +690,6 @@ pipeline {
                         echo ""
                         echo "EC2 and SSM connection verified successfully."
                     '''
-                }
-            }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Verify EC2 SSM Connection",
-                            "SUCCESS",
-                            "VERIFY EC2 SSM CONNECTION"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Verify EC2 SSM Connection",
-                            "FAILURE",
-                            "VERIFY EC2 SSM CONNECTION"
-                        )
-                    }
                 }
             }
         }
@@ -1396,29 +910,6 @@ PY
                     '''
                 }
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Deploy to EC2 via SSM",
-                            "SUCCESS",
-                            "DEPLOY TO EC2 VIA SSM"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Deploy to EC2 via SSM",
-                            "FAILURE",
-                            "DEPLOY TO EC2 VIA SSM"
-                        )
-                    }
-                }
-            }
         }
 
 
@@ -1546,6 +1037,7 @@ PY
 
                             echo ""
                             echo "ERROR: Application health check failed."
+
                             exit 1
 
                         fi
@@ -1560,259 +1052,243 @@ PY
                     '''
                 }
             }
-
-            post {
-
-                success {
-                    script {
-                        notifyStage(
-                            "Application Health Check",
-                            "SUCCESS",
-                            "APPLICATION HEALTH CHECK"
-                        )
-                    }
-                }
-
-                failure {
-                    script {
-                        notifyStage(
-                            "Application Health Check",
-                            "FAILURE",
-                            "APPLICATION HEALTH CHECK"
-                        )
-                    }
-                }
-            }
         }
     }
 
 
-    // ================================================================
-    // POST ACTIONS
-    // ================================================================
+// ================================================================
+// POST ACTIONS
+// ================================================================
 
-    post {
+post {
 
-        always {
+    always {
 
-            echo ""
-            echo "=========================================="
-            echo "PIPELINE EXECUTION COMPLETED"
-            echo "=========================================="
+        echo ""
+        echo "=========================================="
+        echo "PIPELINE EXECUTION COMPLETED"
+        echo "=========================================="
 
-            script {
+        script {
 
-                try {
+            try {
 
-                    // ====================================================
-                    // GET FINAL PIPELINE STATUS
-                    // ====================================================
+                // ====================================================
+                // DETERMINE PIPELINE STATUS
+                // ====================================================
 
-                    def pipelineStatus = currentBuild.currentResult ?: "UNKNOWN"
+                def pipelineStatus = currentBuild.currentResult ?: "UNKNOWN"
 
-                    echo ""
-                    echo "Pipeline Result:"
-                    echo "${pipelineStatus}"
-
-
-                    // ====================================================
-                    // CAPTURE COMPLETE JENKINS CONSOLE OUTPUT
-                    // ====================================================
-
-                    echo ""
-                    echo "=========================================="
-                    echo "CAPTURING JENKINS CONSOLE OUTPUT"
-                    echo "=========================================="
-
-                    def consoleOutput = currentBuild.rawBuild
-                        .getLog(1000000)
-                        .join("\n")
-
-                    echo ""
-                    echo "Console output captured."
-                    echo "Console output size: ${consoleOutput.length()} characters."
+                echo ""
+                echo "Pipeline Result:"
+                echo "${pipelineStatus}"
 
 
-                    // ====================================================
-                    // CREATE LAMBDA PAYLOAD
-                    // ====================================================
+                // ====================================================
+                // CAPTURE COMPLETE JENKINS CONSOLE OUTPUT
+                // ====================================================
 
-                    def payload = [
-                        status         : pipelineStatus,
-                        job            : env.JOB_NAME,
-                        build          : env.BUILD_NUMBER,
-                        build_url      : env.BUILD_URL,
-                        console_output : consoleOutput
+                echo ""
+                echo "=========================================="
+                echo "CAPTURING JENKINS CONSOLE OUTPUT"
+                echo "=========================================="
+
+                def consoleOutput = currentBuild.rawBuild
+                    .getLog(1000000)
+                    .join("\n")
+
+                echo ""
+                echo "Console output captured successfully."
+                echo "Console output size: ${consoleOutput.length()} characters."
+
+
+                // ====================================================
+                // CREATE LAMBDA PAYLOAD
+                // ====================================================
+
+                def payload = [
+                    status         : pipelineStatus,
+                    job            : env.JOB_NAME,
+                    build          : env.BUILD_NUMBER,
+                    build_url      : env.BUILD_URL,
+                    console_output : consoleOutput
+                ]
+
+                def payloadJson =
+                    groovy.json.JsonOutput.toJson(payload)
+
+
+                // ====================================================
+                // WRITE PAYLOAD TO FILE
+                // ====================================================
+
+                writeFile(
+                    file: "/tmp/lambda-payload.json",
+                    text: payloadJson
+                )
+
+
+                // ====================================================
+                // INVOKE AWS LAMBDA
+                // ====================================================
+
+                echo ""
+                echo "=========================================="
+                echo "INVOKING DEVSECOPS NOTIFICATION LAMBDA"
+                echo "=========================================="
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: "${AWS_CREDENTIALS_ID}"
                     ]
+                ]) {
 
-                    def payloadJson =
-                        groovy.json.JsonOutput.toJson(payload)
+                    sh '''
+                        set -e
 
+                        aws lambda invoke \
+                            --function-name devsecops-pipeline-notification \
+                            --region "${AWS_REGION}" \
+                            --cli-binary-format raw-in-base64-out \
+                            --payload fileb:///tmp/lambda-payload.json \
+                            /tmp/lambda-response.json
 
-                    // ====================================================
-                    // WRITE PAYLOAD TO FILE
-                    // ====================================================
-
-                    writeFile(
-                        file: "/tmp/lambda-payload.json",
-                        text: payloadJson
-                    )
-
-
-                    // ====================================================
-                    // INVOKE AWS LAMBDA
-                    // ====================================================
-
-                    echo ""
-                    echo "=========================================="
-                    echo "INVOKING DEVSECOPS NOTIFICATION LAMBDA"
-                    echo "=========================================="
-
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: "${AWS_CREDENTIALS_ID}"
-                        ]
-                    ]) {
-
-                        sh '''
-                            set -e
-
-                            aws lambda invoke \
-                                --function-name devsecops-pipeline-notification \
-                                --region "${AWS_REGION}" \
-                                --cli-binary-format raw-in-base64-out \
-                                --payload fileb:///tmp/lambda-payload.json \
-                                /tmp/lambda-response.json
-
-                            echo ""
-                            echo "Lambda response:"
-                            cat /tmp/lambda-response.json
-                        '''
-                    }
-
-
-                    echo ""
-                    echo "=========================================="
-                    echo "LAMBDA NOTIFICATION SENT"
-                    echo "=========================================="
-
-                    echo ""
-                    echo "Pipeline Status:"
-                    echo "${pipelineStatus}"
-
-                    echo ""
-                    echo "Build:"
-                    echo "${BUILD_NUMBER}"
-
-                    echo ""
-                    echo "Console Output:"
-                    echo "${consoleOutput.length()} characters"
-
-
-                } catch (Exception e) {
-
-                    echo ""
-                    echo "=========================================="
-                    echo "WARNING: LAMBDA NOTIFICATION FAILED"
-                    echo "=========================================="
-
-                    echo ""
-                    echo "Notification error:"
-                    echo "${e.getMessage()}"
-
-                    echo ""
-                    echo "Notification failure will not change"
-                    echo "the original pipeline result."
+                        echo ""
+                        echo "Lambda response:"
+                        cat /tmp/lambda-response.json
+                    '''
                 }
+
+
+                // ====================================================
+                // NOTIFICATION SUCCESS
+                // ====================================================
+
+                echo ""
+                echo "=========================================="
+                echo "LAMBDA NOTIFICATION SENT"
+                echo "=========================================="
+
+                echo ""
+                echo "Pipeline Status:"
+                echo "${pipelineStatus}"
+
+                echo ""
+                echo "Build:"
+                echo "${BUILD_NUMBER}"
+
+                echo ""
+                echo "Console Output:"
+                echo "${consoleOutput.length()} characters"
+
+
+            } catch (Exception e) {
+
+                // ====================================================
+                // NOTIFICATION ERROR
+                // ====================================================
+
+                echo ""
+                echo "=========================================="
+                echo "WARNING: LAMBDA NOTIFICATION FAILED"
+                echo "=========================================="
+
+                echo ""
+                echo "Notification error:"
+                echo "${e.getMessage()}"
+
+                echo ""
+                echo "The pipeline result will not be changed"
+                echo "because of a notification failure."
             }
-
-
-            // ============================================================
-            // CLEAN TEMPORARY FILES
-            // ============================================================
-
-            sh '''
-                rm -f \
-                    /tmp/ec2-deploy.sh \
-                    /tmp/ssm-parameters.json \
-                    /tmp/healthcheck-parameters.json \
-                    /tmp/healthcheck.json \
-                    /tmp/lambda-payload.json \
-                    /tmp/lambda-response.json \
-                    2>/dev/null || true
-            '''
-
-
-            echo ""
-            echo "=========================================="
-            echo "POST ACTIONS COMPLETED"
-            echo "=========================================="
         }
 
 
-        success {
+        // ============================================================
+        // CLEAN TEMPORARY FILES
+        // ============================================================
 
-            echo ""
-            echo "=========================================="
-            echo "DEVSECOPS PIPELINE SUCCESS"
-            echo "=========================================="
-
-            echo ""
-            echo "Build Number:"
-            echo "${BUILD_NUMBER}"
-
-            echo ""
-            echo "Docker Image:"
-            echo "${ECR_URI}:${BUILD_NUMBER}"
-
-            echo ""
-            echo "Deployment:"
-            echo "EC2 via AWS SSM"
-
-            echo ""
-            echo "Security:"
-            echo "Gitleaks - Passed"
-            echo "SonarQube - Completed"
-            echo "npm Audit - Completed"
-            echo "Trivy - Warning Only"
-
-            echo ""
-            echo "Application:"
-            echo "Health Check Passed"
-
-            echo ""
-            echo "=========================================="
-        }
+        sh '''
+            rm -f \
+                /tmp/ec2-deploy.sh \
+                /tmp/ssm-parameters.json \
+                /tmp/healthcheck-parameters.json \
+                /tmp/healthcheck.json \
+                /tmp/lambda-payload.json \
+                /tmp/lambda-response.json \
+                2>/dev/null || true
+        '''
 
 
-        failure {
+        echo ""
+        echo "=========================================="
+        echo "POST ACTIONS COMPLETED"
+        echo "=========================================="
+    }
 
-            echo ""
-            echo "=========================================="
-            echo "DEVSECOPS PIPELINE FAILED"
-            echo "=========================================="
 
-            echo ""
-            echo "Check the FIRST failed stage in Console Output."
+    success {
 
-            echo ""
-            echo "Possible areas:"
+        echo ""
+        echo "=========================================="
+        echo "DEVSECOPS PIPELINE SUCCESS"
+        echo "=========================================="
 
-            echo "1. Gitleaks"
-            echo "2. SonarQube"
-            echo "3. npm dependencies"
-            echo "4. Application test"
-            echo "5. Docker"
-            echo "6. Trivy"
-            echo "7. AWS credentials"
-            echo "8. ECR"
-            echo "9. SSM"
-            echo "10. EC2 deployment"
-            echo "11. Application health check"
+        echo ""
+        echo "Build Number:"
+        echo "${BUILD_NUMBER}"
 
-            echo ""
-            echo "=========================================="
-        }
+        echo ""
+        echo "Docker Image:"
+        echo "${ECR_URI}:${BUILD_NUMBER}"
+
+        echo ""
+        echo "Deployment:"
+        echo "EC2 via AWS SSM"
+
+        echo ""
+        echo "Security:"
+        echo "Gitleaks - Passed"
+        echo "SonarQube - Completed"
+        echo "npm Audit - Completed"
+        echo "Trivy - Warning Only"
+
+        echo ""
+        echo "Application:"
+        echo "Health Check Passed"
+
+        echo ""
+        echo "=========================================="
+    }
+
+
+    failure {
+
+        echo ""
+        echo "=========================================="
+        echo "DEVSECOPS PIPELINE FAILED"
+        echo "=========================================="
+
+        echo ""
+        echo "Check the FIRST failed stage in Console Output."
+
+        echo ""
+        echo "Possible areas:"
+
+        echo "1. Gitleaks"
+        echo "2. SonarQube"
+        echo "3. npm dependencies"
+        echo "4. Application test"
+        echo "5. Docker"
+        echo "6. Trivy"
+        echo "7. AWS credentials"
+        echo "8. ECR"
+        echo "9. SSM"
+        echo "10. EC2 deployment"
+        echo "11. Application health check"
+
+        echo ""
+        echo "=========================================="
     }
 }
