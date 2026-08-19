@@ -9,12 +9,13 @@ def notifyStage(String stageName, String stageStatus, String stageOutput) {
         .take(12000)
 
     def payload = [
-        status      : stageStatus,
-        job         : env.JOB_NAME,
-        build       : env.BUILD_NUMBER,
-        build_url   : env.BUILD_URL,
-        stage       : stageName,
-        stage_output: safeOutput
+        notification_type: "STAGE",
+        status           : stageStatus,
+        job              : env.JOB_NAME,
+        build            : env.BUILD_NUMBER,
+        build_url        : env.BUILD_URL,
+        stage            : stageName,
+        stage_output     : safeOutput
     ]
 
     def payloadJson = groovy.json.JsonOutput.toJson(payload)
