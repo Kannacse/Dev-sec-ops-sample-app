@@ -1037,7 +1037,6 @@ PY
 
                             echo ""
                             echo "ERROR: Application health check failed."
-
                             exit 1
 
                         fi
@@ -1056,239 +1055,232 @@ PY
     }
 
 
-// ================================================================
-// POST ACTIONS
-// ================================================================
+    // ================================================================
+    // POST ACTIONS
+    // ================================================================
 
-post {
+    post {
 
-    always {
+        always {
 
-        echo ""
-        echo "=========================================="
-        echo "PIPELINE EXECUTION COMPLETED"
-        echo "=========================================="
+            echo ""
+            echo "=========================================="
+            echo "PIPELINE EXECUTION COMPLETED"
+            echo "=========================================="
 
-        script {
+            script {
 
-            try {
+                try {
 
-                // ====================================================
-                // DETERMINE PIPELINE STATUS
-                // ====================================================
+                    // ====================================================
+                    // GET FINAL PIPELINE STATUS
+                    // ====================================================
 
-                def pipelineStatus = currentBuild.currentResult ?: "UNKNOWN"
+                    def pipelineStatus = currentBuild.currentResult ?: "UNKNOWN"
 
-                echo ""
-                echo "Pipeline Result:"
-                echo "${pipelineStatus}"
-
-
-                // ====================================================
-                // CAPTURE COMPLETE JENKINS CONSOLE OUTPUT
-                // ====================================================
-
-                echo ""
-                echo "=========================================="
-                echo "CAPTURING JENKINS CONSOLE OUTPUT"
-                echo "=========================================="
-
-                def consoleOutput = currentBuild.rawBuild
-                    .getLog(1000000)
-                    .join("\n")
-
-                echo ""
-                echo "Console output captured successfully."
-                echo "Console output size: ${consoleOutput.length()} characters."
+                    echo ""
+                    echo "Pipeline Result:"
+                    echo "${pipelineStatus}"
 
 
-                // ====================================================
-                // CREATE LAMBDA PAYLOAD
-                // ====================================================
+                    // ====================================================
+                    // CAPTURE COMPLETE JENKINS CONSOLE OUTPUT
+                    // ====================================================
 
-                def payload = [
-                    status         : pipelineStatus,
-                    job            : env.JOB_NAME,
-                    build          : env.BUILD_NUMBER,
-                    build_url      : env.BUILD_URL,
-                    console_output : consoleOutput
-                ]
+                    echo ""
+                    echo "=========================================="
+                    echo "CAPTURING JENKINS CONSOLE OUTPUT"
+                    echo "=========================================="
 
-                def payloadJson =
-                    groovy.json.JsonOutput.toJson(payload)
+                    def consoleOutput = currentBuild.rawBuild
+                        .getLog(1000000)
+                        .join("\n")
 
-
-                // ====================================================
-                // WRITE PAYLOAD TO FILE
-                // ====================================================
-
-                writeFile(
-                    file: "/tmp/lambda-payload.json",
-                    text: payloadJson
-                )
+                    echo ""
+                    echo "Console output captured."
+                    echo "Console output size: ${consoleOutput.length()} characters."
 
 
-                // ====================================================
-                // INVOKE AWS LAMBDA
-                // ====================================================
+                    // ====================================================
+                    // CREATE LAMBDA PAYLOAD
+                    // ====================================================
 
-                echo ""
-                echo "=========================================="
-                echo "INVOKING DEVSECOPS NOTIFICATION LAMBDA"
-                echo "=========================================="
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
+                    def payload = [
+                        status         : pipelineStatus,
+                        job            : env.JOB_NAME,
+                        build          : env.BUILD_NUMBER,
+                        build_url      : env.BUILD_URL,
+                        console_output : consoleOutput
                     ]
-                ]) {
 
-                    sh '''
-                        set -e
+                    def payloadJson =
+                        groovy.json.JsonOutput.toJson(payload)
 
-                        aws lambda invoke \
-                            --function-name devsecops-pipeline-notification \
-                            --region "${AWS_REGION}" \
-                            --cli-binary-format raw-in-base64-out \
-                            --payload fileb:///tmp/lambda-payload.json \
-                            /tmp/lambda-response.json
 
-                        echo ""
-                        echo "Lambda response:"
-                        cat /tmp/lambda-response.json
-                    '''
+                    // ====================================================
+                    // WRITE PAYLOAD TO FILE
+                    // ====================================================
+
+                    writeFile(
+                        file: "/tmp/lambda-payload.json",
+                        text: payloadJson
+                    )
+
+
+                    // ====================================================
+                    // INVOKE AWS LAMBDA
+                    // ====================================================
+
+                    echo ""
+                    echo "=========================================="
+                    echo "INVOKING DEVSECOPS NOTIFICATION LAMBDA"
+                    echo "=========================================="
+
+                    withCredentials([
+                        [
+                            $class: 'AmazonWebServicesCredentialsBinding',
+                            credentialsId: "${AWS_CREDENTIALS_ID}"
+                        ]
+                    ]) {
+
+                        sh '''
+                            set -e
+
+                            aws lambda invoke \
+                                --function-name devsecops-pipeline-notification \
+                                --region "${AWS_REGION}" \
+                                --cli-binary-format raw-in-base64-out \
+                                --payload fileb:///tmp/lambda-payload.json \
+                                /tmp/lambda-response.json
+
+                            echo ""
+                            echo "Lambda response:"
+                            cat /tmp/lambda-response.json
+                        '''
+                    }
+
+
+                    echo ""
+                    echo "=========================================="
+                    echo "LAMBDA NOTIFICATION SENT"
+                    echo "=========================================="
+
+                    echo ""
+                    echo "Pipeline Status:"
+                    echo "${pipelineStatus}"
+
+                    echo ""
+                    echo "Build:"
+                    echo "${BUILD_NUMBER}"
+
+                    echo ""
+                    echo "Console Output:"
+                    echo "${consoleOutput.length()} characters"
+
+
+                } catch (Exception e) {
+
+                    echo ""
+                    echo "=========================================="
+                    echo "WARNING: LAMBDA NOTIFICATION FAILED"
+                    echo "=========================================="
+
+                    echo ""
+                    echo "Notification error:"
+                    echo "${e.getMessage()}"
+
+                    echo ""
+                    echo "Notification failure will not change"
+                    echo "the original pipeline result."
                 }
-
-
-                // ====================================================
-                // NOTIFICATION SUCCESS
-                // ====================================================
-
-                echo ""
-                echo "=========================================="
-                echo "LAMBDA NOTIFICATION SENT"
-                echo "=========================================="
-
-                echo ""
-                echo "Pipeline Status:"
-                echo "${pipelineStatus}"
-
-                echo ""
-                echo "Build:"
-                echo "${BUILD_NUMBER}"
-
-                echo ""
-                echo "Console Output:"
-                echo "${consoleOutput.length()} characters"
-
-
-            } catch (Exception e) {
-
-                // ====================================================
-                // NOTIFICATION ERROR
-                // ====================================================
-
-                echo ""
-                echo "=========================================="
-                echo "WARNING: LAMBDA NOTIFICATION FAILED"
-                echo "=========================================="
-
-                echo ""
-                echo "Notification error:"
-                echo "${e.getMessage()}"
-
-                echo ""
-                echo "The pipeline result will not be changed"
-                echo "because of a notification failure."
             }
+
+
+            // ============================================================
+            // CLEAN TEMPORARY FILES
+            // ============================================================
+
+            sh '''
+                rm -f \
+                    /tmp/ec2-deploy.sh \
+                    /tmp/ssm-parameters.json \
+                    /tmp/healthcheck-parameters.json \
+                    /tmp/healthcheck.json \
+                    /tmp/lambda-payload.json \
+                    /tmp/lambda-response.json \
+                    2>/dev/null || true
+            '''
+
+
+            echo ""
+            echo "=========================================="
+            echo "POST ACTIONS COMPLETED"
+            echo "=========================================="
         }
 
 
-        // ============================================================
-        // CLEAN TEMPORARY FILES
-        // ============================================================
+        success {
 
-        sh '''
-            rm -f \
-                /tmp/ec2-deploy.sh \
-                /tmp/ssm-parameters.json \
-                /tmp/healthcheck-parameters.json \
-                /tmp/healthcheck.json \
-                /tmp/lambda-payload.json \
-                /tmp/lambda-response.json \
-                2>/dev/null || true
-        '''
+            echo ""
+            echo "=========================================="
+            echo "DEVSECOPS PIPELINE SUCCESS"
+            echo "=========================================="
 
+            echo ""
+            echo "Build Number:"
+            echo "${BUILD_NUMBER}"
 
-        echo ""
-        echo "=========================================="
-        echo "POST ACTIONS COMPLETED"
-        echo "=========================================="
-    }
+            echo ""
+            echo "Docker Image:"
+            echo "${ECR_URI}:${BUILD_NUMBER}"
 
+            echo ""
+            echo "Deployment:"
+            echo "EC2 via AWS SSM"
 
-    success {
+            echo ""
+            echo "Security:"
+            echo "Gitleaks - Passed"
+            echo "SonarQube - Completed"
+            echo "npm Audit - Completed"
+            echo "Trivy - Warning Only"
 
-        echo ""
-        echo "=========================================="
-        echo "DEVSECOPS PIPELINE SUCCESS"
-        echo "=========================================="
+            echo ""
+            echo "Application:"
+            echo "Health Check Passed"
 
-        echo ""
-        echo "Build Number:"
-        echo "${BUILD_NUMBER}"
-
-        echo ""
-        echo "Docker Image:"
-        echo "${ECR_URI}:${BUILD_NUMBER}"
-
-        echo ""
-        echo "Deployment:"
-        echo "EC2 via AWS SSM"
-
-        echo ""
-        echo "Security:"
-        echo "Gitleaks - Passed"
-        echo "SonarQube - Completed"
-        echo "npm Audit - Completed"
-        echo "Trivy - Warning Only"
-
-        echo ""
-        echo "Application:"
-        echo "Health Check Passed"
-
-        echo ""
-        echo "=========================================="
-    }
+            echo ""
+            echo "=========================================="
+        }
 
 
-    failure {
+        failure {
 
-        echo ""
-        echo "=========================================="
-        echo "DEVSECOPS PIPELINE FAILED"
-        echo "=========================================="
+            echo ""
+            echo "=========================================="
+            echo "DEVSECOPS PIPELINE FAILED"
+            echo "=========================================="
 
-        echo ""
-        echo "Check the FIRST failed stage in Console Output."
+            echo ""
+            echo "Check the FIRST failed stage in Console Output."
 
-        echo ""
-        echo "Possible areas:"
+            echo ""
+            echo "Possible areas:"
 
-        echo "1. Gitleaks"
-        echo "2. SonarQube"
-        echo "3. npm dependencies"
-        echo "4. Application test"
-        echo "5. Docker"
-        echo "6. Trivy"
-        echo "7. AWS credentials"
-        echo "8. ECR"
-        echo "9. SSM"
-        echo "10. EC2 deployment"
-        echo "11. Application health check"
+            echo "1. Gitleaks"
+            echo "2. SonarQube"
+            echo "3. npm dependencies"
+            echo "4. Application test"
+            echo "5. Docker"
+            echo "6. Trivy"
+            echo "7. AWS credentials"
+            echo "8. ECR"
+            echo "9. SSM"
+            echo "10. EC2 deployment"
+            echo "11. Application health check"
 
-        echo ""
-        echo "=========================================="
+            echo ""
+            echo "=========================================="
+        }
     }
 }
