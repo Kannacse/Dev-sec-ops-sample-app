@@ -1,16 +1,33 @@
-pipeline {
+import groovy.json.JsonOutput
 
-    def notifyStage(String stageName, String stageStatus, String stageOutput) {
-
-    echo ""
-    echo "=========================================="
-    echo "STAGE NOTIFICATION"
-    echo "=========================================="
-
-    echo "Stage: ${stageName}"
-    echo "Status: ${stageStatus}"
-
+/* ================================================================
+ * STAGE NOTIFICATION HELPERS
+ * ================================================================ */
+def getStageOutput(String marker) {
     try {
+        def lines = currentBuild.rawBuild.getLog(1000000)
+        int start = -1
+
+        for (int i = lines.size() - 1; i >= 0; i--) {
+            if (lines[i].contains(marker)) {
+                start = i
+                break
+            }
+        }
+
+        if (start >= 0) {
+            return lines.subList(start, lines.size()).join("\\n")
+        }
+
+        return "Stage output marker not found: ${marker}"
+    } catch (Exception e) {
+        return "Unable to capture stage output: ${e.getMessage()}"
+    }
+}
+
+def notifyStage(String stageName, String stageStatus, String stageMarker) {
+    try {
+        def stageOutput = getStageOutput(stageMarker)
 
         def payload = [
             notification_type: "STAGE",
@@ -24,24 +41,21 @@ pipeline {
 
         writeFile(
             file: "/tmp/stage-notification.json",
-            text: groovy.json.JsonOutput.toJson(payload)
+            text: JsonOutput.toJson(payload)
         )
 
         withCredentials([
-            [
-                $class: 'AmazonWebServicesCredentialsBinding',
-                credentialsId: "${AWS_CREDENTIALS_ID}"
-            ]
+            [$class: 'AmazonWebServicesCredentialsBinding',
+             credentialsId: "${env.AWS_CREDENTIALS_ID}"]
         ]) {
-
             sh '''
                 set -e
 
-                aws lambda invoke \
-                    --function-name devsecops-pipeline-notification \
-                    --region "${AWS_REGION}" \
-                    --cli-binary-format raw-in-base64-out \
-                    --payload fileb:///tmp/stage-notification.json \
+                aws lambda invoke \\
+                    --function-name devsecops-pipeline-notification \\
+                    --region "${AWS_REGION}" \\
+                    --cli-binary-format raw-in-base64-out \\
+                    --payload fileb:///tmp/stage-notification.json \\
                     /tmp/stage-notification-response.json
 
                 echo ""
@@ -50,25 +64,20 @@ pipeline {
             '''
         }
 
-        echo ""
-        echo "Stage notification sent successfully."
-
+        echo "Stage notification sent successfully: ${stageName} - ${stageStatus}"
     } catch (Exception e) {
-
-        echo ""
-        echo "WARNING: Stage notification failed."
+        echo "WARNING: Stage notification failed for ${stageName}."
         echo "Notification error: ${e.getMessage()}"
-
-        // Notification failure must NOT fail the pipeline.
+        // Notification failure must never fail the actual pipeline.
+    } finally {
+        sh '''
+            rm -f /tmp/stage-notification.json /tmp/stage-notification-response.json 2>/dev/null || true
+        '''
     }
+}
 
-    sh '''
-        rm -f \
-            /tmp/stage-notification.json \
-            /tmp/stage-notification-response.json \
-            2>/dev/null || true
-    '''
-    }
+pipeline {
+
     agent any
 
     options {
@@ -134,6 +143,10 @@ pipeline {
         stage('Checkout') {
 
             steps {
+
+                echo "=========================================="
+                echo "CHECKOUT"
+                echo "=========================================="
 
                 checkout scm
             }
@@ -1118,6 +1131,397 @@ PY
                         echo ""
                         echo "Application is healthy on EC2."
                     '''
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Checkout",
+                            "SUCCESS",
+                            "CHECKOUT"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Checkout",
+                            "FAILURE",
+                            "CHECKOUT"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Verify Source",
+                            "SUCCESS",
+                            "VERIFYING APPLICATION SOURCE"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Verify Source",
+                            "FAILURE",
+                            "VERIFYING APPLICATION SOURCE"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Secret Scan - Gitleaks",
+                            "SUCCESS",
+                            "GITLEAKS SECRET SCAN"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Secret Scan - Gitleaks",
+                            "FAILURE",
+                            "GITLEAKS SECRET SCAN"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "SonarQube Connection Test",
+                            "SUCCESS",
+                            "SONARQUBE CONNECTION TEST"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "SonarQube Connection Test",
+                            "FAILURE",
+                            "SONARQUBE CONNECTION TEST"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "SAST - SonarQube",
+                            "SUCCESS",
+                            "SONARQUBE SAST SCAN"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "SAST - SonarQube",
+                            "FAILURE",
+                            "SONARQUBE SAST SCAN"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Install Dependencies",
+                            "SUCCESS",
+                            "INSTALL NODE.JS DEPENDENCIES"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Install Dependencies",
+                            "FAILURE",
+                            "INSTALL NODE.JS DEPENDENCIES"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Dependency Audit",
+                            "SUCCESS",
+                            "NPM DEPENDENCY AUDIT"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Dependency Audit",
+                            "FAILURE",
+                            "NPM DEPENDENCY AUDIT"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Application Test",
+                            "SUCCESS",
+                            "APPLICATION TEST"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Application Test",
+                            "FAILURE",
+                            "APPLICATION TEST"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Docker Build",
+                            "SUCCESS",
+                            "DOCKER IMAGE BUILD"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Docker Build",
+                            "FAILURE",
+                            "DOCKER IMAGE BUILD"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Container Scan - Trivy",
+                            "SUCCESS",
+                            "TRIVY CONTAINER SECURITY SCAN"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Container Scan - Trivy",
+                            "FAILURE",
+                            "TRIVY CONTAINER SECURITY SCAN"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "AWS Connection Test",
+                            "SUCCESS",
+                            "AWS CONNECTION TEST"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "AWS Connection Test",
+                            "FAILURE",
+                            "AWS CONNECTION TEST"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "ECR Login",
+                            "SUCCESS",
+                            "ECR LOGIN"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "ECR Login",
+                            "FAILURE",
+                            "ECR LOGIN"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Push Image to ECR",
+                            "SUCCESS",
+                            "PUSH IMAGE TO ECR"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Push Image to ECR",
+                            "FAILURE",
+                            "PUSH IMAGE TO ECR"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Get ECR Image Digest",
+                            "SUCCESS",
+                            "GET ECR IMAGE DIGEST"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Get ECR Image Digest",
+                            "FAILURE",
+                            "GET ECR IMAGE DIGEST"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Verify EC2 SSM Connection",
+                            "SUCCESS",
+                            "VERIFY EC2 SSM CONNECTION"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Verify EC2 SSM Connection",
+                            "FAILURE",
+                            "VERIFY EC2 SSM CONNECTION"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Deploy to EC2 via SSM",
+                            "SUCCESS",
+                            "DEPLOY TO EC2 VIA SSM"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Deploy to EC2 via SSM",
+                            "FAILURE",
+                            "DEPLOY TO EC2 VIA SSM"
+                        )
+                    }
+                }
+            }
+
+            post {
+
+                success {
+                    script {
+                        notifyStage(
+                            "Application Health Check",
+                            "SUCCESS",
+                            "APPLICATION HEALTH CHECK"
+                        )
+                    }
+                }
+
+                failure {
+                    script {
+                        notifyStage(
+                            "Application Health Check",
+                            "FAILURE",
+                            "APPLICATION HEALTH CHECK"
+                        )
+                    }
                 }
             }
         }
