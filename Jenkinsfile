@@ -1,1147 +1,1866 @@
-// ================================================================ // STAGE NOTIFICATION HELPER // Sends one notification per stage to SES/Gmail and Google Chat. // ================================================================
+// ================================================================
+// STAGE NOTIFICATION HELPER
+// Sends one notification per stage to SES/Gmail and Google Chat.
+// ================================================================
+
 def notifyStage(String stageName, String stageStatus, String stageOutput) {
-def safeOutput = (stageOutput ?: "No stage output captured.")
-    .take(12000)
 
-def payload = [
-    notification_type: "STAGE",
-    status           : stageStatus,
-    job              : env.JOB_NAME,
-    build            : env.BUILD_NUMBER,
-    build_url        : env.BUILD_URL,
-    stage            : stageName,
-    stage_output     : safeOutput
-]
+    def safeOutput = (stageOutput ?: "No stage output captured.").take(12000)
 
-def payloadJson = groovy.json.JsonOutput.toJson(payload)
+    def payload = [
+        notification_type: "STAGE",
+        status           : stageStatus,
+        job              : env.JOB_NAME,
+        build            : env.BUILD_NUMBER,
+        build_url        : env.BUILD_URL,
+        stage            : stageName,
+        stage_output     : safeOutput
+    ]
 
-writeFile(
-    file: "/tmp/stage-notification-${BUILD_NUMBER}.json",
-    text: payloadJson
-)
+    def payloadJson = groovy.json.JsonOutput.toJson(payload)
 
-try {
-    withEnv(["STAGE_NAME_FOR_NOTIFY=${stageName}", "STAGE_STATUS_FOR_NOTIFY=${stageStatus}"]) {
+    writeFile(
+        file: "/tmp/stage-notification-${BUILD_NUMBER}.json",
+        text: payloadJson
+    )
+
+    try {
+
+        withEnv([
+            "STAGE_NAME_FOR_NOTIFY=${stageName}",
+            "STAGE_STATUS_FOR_NOTIFY=${stageStatus}"
+        ]) {
+
+            withCredentials([
+                [
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: "${AWS_CREDENTIALS_ID}"
+                ]
+            ]) {
+
+                sh '''
+                    set -e
+
+                    echo ""
+                    echo "=========================================="
+                    echo "STAGE NOTIFICATION"
+                    echo "=========================================="
+                    echo "Stage: ${STAGE_NAME_FOR_NOTIFY}"
+                    echo "Status: ${STAGE_STATUS_FOR_NOTIFY}"
+                    echo ""
+                    echo "Invoking notification Lambda..."
+
+                    aws lambda invoke \
+                        --function-name devsecops-pipeline-notification \
+                        --region "${AWS_REGION}" \
+                        --cli-binary-format raw-in-base64-out \
+                        --payload fileb:///tmp/stage-notification-${BUILD_NUMBER}.json \
+                        /tmp/stage-notification-response-${BUILD_NUMBER}.json
+
+                    echo ""
+                    echo "Lambda response:"
+                    cat /tmp/stage-notification-response-${BUILD_NUMBER}.json
+                '''
+            }
+        }
+
+    } catch (Exception e) {
+
+        echo "WARNING: Stage notification failed for ${stageName}: ${e.getMessage()}"
+    }
+}
+
+
+// ================================================================
+// COMPLETE BUILD NOTIFICATION HELPER
+//
+// Sends ONE final notification containing:
+//
+// - Build status
+// - Job name
+// - Build number
+// - Build URL
+// - Commit ID
+// - Commit message
+// - Author
+// - Output from all captured stages
+//
+// This is sent once after the pipeline finishes.
+// ================================================================
+
+def notifyCompleteBuild() {
+
+    try {
+
+        echo ""
+        echo "=========================================="
+        echo "PREPARING COMPLETE BUILD NOTIFICATION"
+        echo "=========================================="
+
+        def buildStatus = currentBuild.currentResult ?: "UNKNOWN"
+
+        def commitId = sh(
+            script: '''
+                git rev-parse HEAD 2>/dev/null || echo "N/A"
+            ''',
+            returnStdout: true
+        ).trim()
+
+        def commitMessage = sh(
+            script: '''
+                git log -1 --pretty=%s 2>/dev/null || echo "N/A"
+            ''',
+            returnStdout: true
+        ).trim()
+
+        def author = sh(
+            script: '''
+                git log -1 --pretty=%an 2>/dev/null || echo "N/A"
+            ''',
+            returnStdout: true
+        ).trim()
+
+        def completeLogFile =
+            "/tmp/complete-build-${BUILD_NUMBER}.log"
+
+        /*
+         * Create the complete build report.
+         *
+         * IMPORTANT:
+         * The individual stage log files must exist before
+         * this function runs.
+         */
+
+        sh(
+            script: """
+                set +e
+
+                rm -f '${completeLogFile}'
+
+                cat >> '${completeLogFile}' <<'BUILD_HEADER'
+============================================================
+JENKINS DEVSECOPS BUILD REPORT
+============================================================
+
+BUILD INFORMATION
+------------------------------------------------------------
+BUILD JOB       : ${env.JOB_NAME}
+BUILD NUMBER    : #${env.BUILD_NUMBER}
+STATUS          : ${buildStatus}
+BUILD URL       : ${env.BUILD_URL}
+COMMIT ID       : ${commitId}
+COMMIT MESSAGE  : ${commitMessage}
+AUTHOR          : ${author}
+
+============================================================
+BUILD LOGS
+============================================================
+BUILD_HEADER
+            """
+        )
+
+        /*
+         * Helper closure for appending each stage log.
+         */
+
+        def appendStageLog = { Integer number, String stageName ->
+
+            def file =
+                "/tmp/jenkins-stage-${BUILD_NUMBER}-${number}.log"
+
+            sh(
+                script: """
+                    if [ -f '${file}' ]; then
+
+                        echo "" >> '${completeLogFile}'
+                        echo "============================================================" >> '${completeLogFile}'
+                        echo "STAGE ${number}: ${stageName.toUpperCase()}" >> '${completeLogFile}'
+                        echo "============================================================" >> '${completeLogFile}'
+                        echo "" >> '${completeLogFile}'
+
+                        cat '${file}' >> '${completeLogFile}'
+
+                    else
+
+                        echo "" >> '${completeLogFile}'
+                        echo "============================================================" >> '${completeLogFile}'
+                        echo "STAGE ${number}: ${stageName.toUpperCase()}" >> '${completeLogFile}'
+                        echo "============================================================" >> '${completeLogFile}'
+                        echo "No stage log file was captured." >> '${completeLogFile}'
+
+                    fi
+                """
+            )
+        }
+
+        // --------------------------------------------------------
+        // APPEND ALL 17 STAGES
+        // --------------------------------------------------------
+
+        appendStageLog(1,  "Checkout")
+        appendStageLog(2,  "Verify Source")
+        appendStageLog(3,  "Secret Scan - Gitleaks")
+        appendStageLog(4,  "SonarQube Connection Test")
+        appendStageLog(5,  "SAST - SonarQube")
+        appendStageLog(6,  "Install Dependencies")
+        appendStageLog(7,  "Dependency Audit")
+        appendStageLog(8,  "Application Test")
+        appendStageLog(9,  "Docker Build")
+        appendStageLog(10, "Container Scan - Trivy")
+        appendStageLog(11, "AWS Connection Test")
+        appendStageLog(12, "ECR Login")
+        appendStageLog(13, "Push Image to ECR")
+        appendStageLog(14, "Get ECR Image Digest")
+        appendStageLog(15, "Verify EC2 SSM Connection")
+        appendStageLog(16, "Deploy to EC2 via SSM")
+        appendStageLog(17, "Application Health Check")
+
+        sh(
+            script: """
+                cat >> '${completeLogFile}' <<'BUILD_FOOTER'
+
+============================================================
+BUILD COMPLETED
+============================================================
+BUILD_FOOTER
+
+                echo "Build Status: ${buildStatus}" >> '${completeLogFile}'
+
+                echo "" >> '${completeLogFile}'
+                echo "Notification generated by Jenkins." >> '${completeLogFile}'
+            """
+        )
+
+        def completeLog = readFile(completeLogFile)
+
+        /*
+         * Lambda synchronous invocation has a payload-size limit.
+         *
+         * Keep enough space for JSON metadata.
+         *
+         * Email can contain the complete report generated here.
+         * Google Chat can be safely truncated by Lambda if required.
+         */
+
+        if (completeLog.length() > 5000000) {
+
+            completeLog =
+                completeLog.take(5000000) +
+                """
+
+============================================================
+BUILD LOG TRUNCATED
+============================================================
+
+The complete Jenkins console output is available in Jenkins.
+"""
+        }
+
+        def payload = [
+            notification_type: "PIPELINE",
+            status           : buildStatus,
+            job              : env.JOB_NAME,
+            build            : env.BUILD_NUMBER,
+            build_url        : env.BUILD_URL,
+            commit_id        : commitId,
+            commit_message   : commitMessage,
+            author           : author,
+            console_output   : completeLog
+        ]
+
+        def payloadJson =
+            groovy.json.JsonOutput.toJson(payload)
+
+        def payloadFile =
+            "/tmp/pipeline-notification-${BUILD_NUMBER}.json"
+
+        writeFile(
+            file: payloadFile,
+            text: payloadJson
+        )
+
         withCredentials([
             [
                 $class: 'AmazonWebServicesCredentialsBinding',
                 credentialsId: "${AWS_CREDENTIALS_ID}"
             ]
         ]) {
-            sh '''
-        set -e
 
-        echo ""
-        echo "=========================================="
-        echo "STAGE NOTIFICATION"
-        echo "=========================================="
-        echo "Stage: ${STAGE_NAME_FOR_NOTIFY}"
-        echo "Status: ${STAGE_STATUS_FOR_NOTIFY}"
-        echo ""
-        echo "Invoking notification Lambda..."
+            sh """
+                set -e
 
-        aws lambda invoke \
-            --function-name devsecops-pipeline-notification \
-            --region "${AWS_REGION}" \
-            --cli-binary-format raw-in-base64-out \
-            --payload fileb:///tmp/stage-notification-${BUILD_NUMBER}.json \
-            /tmp/stage-notification-response-${BUILD_NUMBER}.json
+                echo ""
+                echo "=========================================="
+                echo "COMPLETE BUILD NOTIFICATION"
+                echo "=========================================="
 
-        echo ""
-        echo "Lambda response:"
-        cat /tmp/stage-notification-response-${BUILD_NUMBER}.json
-            '''
+                echo "Build : ${BUILD_NUMBER}"
+                echo "Status: ${buildStatus}"
+                echo ""
+                echo "Invoking notification Lambda..."
+
+                aws lambda invoke \
+                    --function-name devsecops-pipeline-notification \
+                    --region "${AWS_REGION}" \
+                    --cli-binary-format raw-in-base64-out \
+                    --payload fileb://${payloadFile} \
+                    /tmp/pipeline-notification-response-${BUILD_NUMBER}.json
+
+                echo ""
+                echo "Lambda response:"
+                cat /tmp/pipeline-notification-response-${BUILD_NUMBER}.json
+            """
         }
+
+        echo ""
+        echo "Complete build notification sent successfully."
+
+    } catch (Exception e) {
+
+        /*
+         * Notification failure must NOT make the actual
+         * DevSecOps pipeline fail.
+         */
+
+        echo ""
+        echo "WARNING: Complete build notification failed."
+        echo "Reason: ${e.getMessage()}"
     }
-} catch (Exception e) {
-    echo "WARNING: Stage notification failed for ${stageName}: ${e.getMessage()}"
 }
-}
+
+
+// ================================================================
+// PIPELINE
+// ================================================================
+
 pipeline {
-agent any
 
-options {
-    skipDefaultCheckout(true)
-    disableConcurrentBuilds()
-    timestamps()
-    timeout(time: 45, unit: 'MINUTES')
-}
+    agent any
 
-environment {
+    options {
 
-    // ============================================================
-    // AWS
-    // ============================================================
+        skipDefaultCheckout(true)
 
-    AWS_REGION = 'us-east-1'
-    AWS_ACCOUNT_ID = '042775549160'
+        disableConcurrentBuilds()
 
-    ECR_REPOSITORY = 'devsecops-sample-app'
+        timestamps()
 
-    ECR_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+        timeout(
+            time: 45,
+            unit: 'MINUTES'
+        )
+    }
 
-    AWS_CREDENTIALS_ID = 'aws-hrms-v2-taff'
+    environment {
 
+        // ========================================================
+        // AWS
+        // ========================================================
 
-    // ============================================================
-    // SONARQUBE
-    // ============================================================
+        AWS_REGION = 'us-east-1'
 
-    SONARQUBE_SERVER = 'sonarqube-dev-sec'
+        AWS_ACCOUNT_ID = '042775549160'
 
-    SONAR_TOKEN_CREDENTIAL_ID = 'sonarqube-jenkins-token'
+        ECR_REPOSITORY = 'devsecops-sample-app'
 
-    SONAR_SCANNER_HOME = '/opt/sonar-scanner'
+        ECR_URI =
+            "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
 
-
-    // ============================================================
-    // EC2 / SSM
-    // ============================================================
-
-    EC2_INSTANCE_ID = 'i-096fc3c14a9db3ad8'
-
-    EC2_PORT = '3000'
+        AWS_CREDENTIALS_ID = 'aws-hrms-v2-taff'
 
 
-    // ============================================================
-    // APPLICATION
-    // ============================================================
+        // ========================================================
+        // SONARQUBE
+        // ========================================================
 
-    APP_NAME = 'devsecops-sample-app'
+        SONARQUBE_SERVER = 'sonarqube-dev-sec'
 
-    DOCKER_CONTAINER_NAME = 'devsecops-sample-app'
-}
+        SONAR_TOKEN_CREDENTIAL_ID =
+            'sonarqube-jenkins-token'
 
-
-stages {
-
-
-    // ============================================================
-    // 1. CHECKOUT
-    // ============================================================
-
-    stage('Checkout') {
-
-        steps {
-            script {
-                def stageName = "Checkout"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-1.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+        SONAR_SCANNER_HOME =
+            '/opt/sonar-scanner'
 
 
-                checkout scm
-        
-                    }
+        // ========================================================
+        // EC2 / SSM
+        // ========================================================
 
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
+        EC2_INSTANCE_ID =
+            'i-096fc3c14a9db3ad8'
 
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
-                }
-            }
-        }
+        EC2_PORT = '3000'
+
+
+        // ========================================================
+        // APPLICATION
+        // ========================================================
+
+        APP_NAME =
+            'devsecops-sample-app'
+
+        DOCKER_CONTAINER_NAME =
+            'devsecops-sample-app'
     }
 
 
     // ============================================================
-    // 2. VERIFY SOURCE
+    // STAGES
     // ============================================================
 
-    stage('Verify Source') {
-
-        steps {
-            script {
-                def stageName = "Verify Source"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-2.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+    stages {
 
 
-                sh '''
-                        set -o pipefail
-                        {
+        // ========================================================
+        // 1. CHECKOUT
+        // ========================================================
 
-                    set -e
+        stage('Checkout') {
 
-                    echo "=========================================="
-                    echo "VERIFYING APPLICATION SOURCE"
-                    echo "=========================================="
+            steps {
 
-                    echo ""
-                    echo "Workspace:"
-                    pwd
+                script {
 
-                    echo ""
-                    echo "Files:"
-                    ls -la
+                    def stageName = "Checkout"
 
-                    echo ""
-                    echo "Checking required files..."
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-1.log"
 
-                    test -f app.js
-                    test -f package.json
-                    test -f package-lock.json
-                    test -f Dockerfile
-                    test -f Jenkinsfile
-                    test -f sonar-project.properties
+                    try {
 
-                    echo ""
-                    echo "Source verification successful."
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
-                    }
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
+                            checkout scm
+                        }
 
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
-                }
-            }
-        }
-    }
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
 
-
-    // ============================================================
-    // 3. GITLEAKS SECRET SCAN
-    // ============================================================
-
-    stage('Secret Scan - Gitleaks') {
-
-        steps {
-            script {
-                def stageName = "Secret Scan - Gitleaks"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-3.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
-
-
-                sh '''
-                        set -o pipefail
-                        {
-
-                    set -e
-
-                    echo "=========================================="
-                    echo "GITLEAKS SECRET SCAN"
-                    echo "=========================================="
-
-                    gitleaks detect \
-                        --source . \
-                        --no-banner
-
-                    echo ""
-                    echo "Gitleaks scan passed."
-                    echo "No secrets detected."
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
-                    }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
-                }
-            }
-        }
-    }
-
-
-    // ============================================================
-    // 4. SONARQUBE CONNECTION TEST
-    // ============================================================
-
-    stage('SonarQube Connection Test') {
-
-        steps {
-            script {
-                def stageName = "SonarQube Connection Test"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-4.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
-
-
-                withSonarQubeEnv("${SONARQUBE_SERVER}") {
-
-                    sh '''
-                        set -o pipefail
-                        {
-
-                        set -e
-
-                        echo "=========================================="
-                        echo "SONARQUBE CONNECTION TEST"
-                        echo "=========================================="
-
-                        echo ""
-                        echo "SonarQube URL:"
-                        echo "$SONAR_HOST_URL"
-
-                        echo ""
-                        echo "Checking SonarQube..."
-
-                        curl -fsS \
-                            "$SONAR_HOST_URL/api/system/status"
-
-                        echo ""
-                        echo ""
-                        echo "SonarQube connection successful."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
-                    }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
-                }
-            }
-        }
-    }
-
-
-    // ============================================================
-    // 5. SONARQUBE SAST
-    // ============================================================
-
-    stage('SAST - SonarQube') {
-
-        steps {
-            script {
-                def stageName = "SAST - SonarQube"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-5.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
-
-
-                withSonarQubeEnv("${SONARQUBE_SERVER}") {
-
-                    withCredentials([
-                        string(
-                            credentialsId: "${SONAR_TOKEN_CREDENTIAL_ID}",
-                            variable: 'SONAR_TOKEN'
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
                         )
-                    ]) {
 
-                        sh '''
-                        set -o pipefail
-                        {
+                    } catch (Exception e) {
 
-                            set -e
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
 
-                            echo "=========================================="
-                            echo "SONARQUBE SAST SCAN"
-                            echo "=========================================="
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
 
-                            echo ""
-                            echo "Checking SonarScanner..."
-
-                            test -x "${SONAR_SCANNER_HOME}/bin/sonar-scanner"
-
-                            "${SONAR_SCANNER_HOME}/bin/sonar-scanner" \
-                                --version
-
-                            echo ""
-                            echo "Running SonarQube SAST..."
-
-                            "${SONAR_SCANNER_HOME}/bin/sonar-scanner" \
-                                -Dsonar.token="$SONAR_TOKEN"
-
-                            echo ""
-                            echo "SonarQube SAST scan completed."
-                    
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
+                        throw e
                     }
-                }
-        
-                    }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 6. INSTALL DEPENDENCIES
-    // ============================================================
+        // ========================================================
+        // 2. VERIFY SOURCE
+        // ========================================================
 
-    stage('Install Dependencies') {
+        stage('Verify Source') {
 
-        steps {
-            script {
-                def stageName = "Install Dependencies"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-6.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                sh '''
-                        set -o pipefail
-                        {
+                    def stageName = "Verify Source"
 
-                    set -e
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-2.log"
 
-                    echo "=========================================="
-                    echo "INSTALL NODE.JS DEPENDENCIES"
-                    echo "=========================================="
+                    try {
 
-                    echo ""
-                    echo "Node version:"
-                    node --version
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                    echo ""
-                    echo "NPM version:"
-                    npm --version
+                            sh '''
+                                set -o pipefail
+                                {
+                                    set -e
 
-                    echo ""
-                    echo "Installing dependencies..."
+                                    echo "=========================================="
+                                    echo "VERIFYING APPLICATION SOURCE"
+                                    echo "=========================================="
 
-                    npm ci
+                                    echo ""
+                                    echo "Workspace:"
+                                    pwd
 
-                    echo ""
-                    echo "Dependencies installed successfully."
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
+                                    echo ""
+                                    echo "Files:"
+                                    ls -la
+
+                                    echo ""
+                                    echo "Checking required files..."
+
+                                    test -f app.js
+                                    test -f package.json
+                                    test -f package-lock.json
+                                    test -f Dockerfile
+                                    test -f Jenkinsfile
+                                    test -f sonar-project.properties
+
+                                    echo ""
+                                    echo "Source verification successful."
+
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 7. DEPENDENCY AUDIT
-    // WARNING ONLY
-    // ============================================================
+        // ========================================================
+        // 3. GITLEAKS SECRET SCAN
+        // ========================================================
 
-    stage('Dependency Audit') {
+        stage('Secret Scan - Gitleaks') {
 
-        steps {
-            script {
-                def stageName = "Dependency Audit"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-7.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                sh '''
-                        set -o pipefail
-                        {
+                    def stageName =
+                        "Secret Scan - Gitleaks"
 
-                    echo "=========================================="
-                    echo "NPM DEPENDENCY AUDIT"
-                    echo "=========================================="
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-3.log"
 
-                    echo ""
-                    echo "Running npm audit..."
+                    try {
 
-                    set +e
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                    npm audit --audit-level=high
+                            sh '''
+                                set -o pipefail
+                                {
+                                    set -e
 
-                    AUDIT_EXIT_CODE=$?
+                                    echo "=========================================="
+                                    echo "GITLEAKS SECRET SCAN"
+                                    echo "=========================================="
 
-                    set -e
+                                    gitleaks detect \
+                                        --source . \
+                                        --no-banner
 
-                    echo ""
-                    echo "npm audit exit code: $AUDIT_EXIT_CODE"
+                                    echo ""
+                                    echo "Gitleaks scan passed."
+                                    echo "No secrets detected."
 
-                    if [ "$AUDIT_EXIT_CODE" -ne 0 ]; then
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
 
-                        echo ""
-                        echo "WARNING: npm audit reported vulnerabilities."
-                        echo "Pipeline will continue."
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
 
-                    else
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
 
-                        echo ""
-                        echo "npm audit passed."
+                    } catch (Exception e) {
 
-                    fi
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
 
-                    echo ""
-                    echo "Dependency audit stage completed."
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 8. APPLICATION TEST
-    // ============================================================
+        // ========================================================
+        // 4. SONARQUBE CONNECTION TEST
+        // ========================================================
 
-    stage('Application Test') {
+        stage('SonarQube Connection Test') {
 
-        steps {
-            script {
-                def stageName = "Application Test"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-8.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                sh '''
-                        set -o pipefail
-                        {
+                    def stageName =
+                        "SonarQube Connection Test"
 
-                    set -e
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-4.log"
 
-                    echo "=========================================="
-                    echo "APPLICATION TEST"
-                    echo "=========================================="
+                    try {
 
-                    TEST_SCRIPT=$(node -p "require('./package.json').scripts?.test || ''")
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                    echo ""
-                    echo "Configured test script:"
-                    echo "$TEST_SCRIPT"
+                            withSonarQubeEnv(
+                                "${SONARQUBE_SERVER}"
+                            ) {
 
-                    if [ -z "$TEST_SCRIPT" ]; then
+                                sh '''
+                                    set -o pipefail
+                                    {
+                                        set -e
 
-                        echo ""
-                        echo "No test script is configured."
-                        echo "Skipping application tests."
+                                        echo "=========================================="
+                                        echo "SONARQUBE CONNECTION TEST"
+                                        echo "=========================================="
 
-                    elif echo "$TEST_SCRIPT" | grep -qi "no test specified"; then
+                                        echo ""
+                                        echo "SonarQube URL:"
+                                        echo "$SONAR_HOST_URL"
 
-                        echo ""
-                        echo "Placeholder test script detected."
-                        echo "No automated application tests are configured."
-                        echo "Skipping application tests."
+                                        echo ""
+                                        echo "Checking SonarQube..."
 
-                    else
+                                        curl -fsS \
+                                            "$SONAR_HOST_URL/api/system/status"
 
-                        echo ""
-                        echo "Running application tests..."
+                                        echo ""
+                                        echo ""
+                                        echo "SonarQube connection successful."
 
-                        npm test
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
 
-                        echo ""
-                        echo "Application tests passed."
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
 
-                    fi
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
 
-                    echo ""
-                    echo "Application test stage completed."
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 9. DOCKER BUILD
-    // ============================================================
+        // ========================================================
+        // 5. SONARQUBE SAST
+        // ========================================================
 
-    stage('Docker Build') {
+        stage('SAST - SonarQube') {
 
-        steps {
-            script {
-                def stageName = "Docker Build"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-9.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                sh '''
-                        set -o pipefail
-                        {
+                    def stageName =
+                        "SAST - SonarQube"
 
-                    set -e
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-5.log"
 
-                    echo "=========================================="
-                    echo "DOCKER IMAGE BUILD"
-                    echo "=========================================="
+                    try {
 
-                    echo ""
-                    echo "Docker version:"
-                    docker --version
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                    echo ""
-                    echo "Building image..."
+                            withSonarQubeEnv(
+                                "${SONARQUBE_SERVER}"
+                            ) {
 
-                    docker build \
-                        -t "$ECR_URI:$BUILD_NUMBER" \
-                        -t "$ECR_URI:latest" \
-                        .
+                                withCredentials([
+                                    string(
+                                        credentialsId:
+                                            "${SONAR_TOKEN_CREDENTIAL_ID}",
+                                        variable: 'SONAR_TOKEN'
+                                    )
+                                ]) {
 
-                    echo ""
-                    echo "Docker image built successfully."
+                                    sh '''
+                                        set -o pipefail
+                                        {
+                                            set -e
 
-                    echo ""
-                    echo "Built images:"
+                                            echo "=========================================="
+                                            echo "SONARQUBE SAST SCAN"
+                                            echo "=========================================="
 
-                    docker images | grep "$ECR_REPOSITORY" || true
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
+                                            echo ""
+                                            echo "Checking SonarScanner..."
+
+                                            test -x \
+                                                "${SONAR_SCANNER_HOME}/bin/sonar-scanner"
+
+                                            "${SONAR_SCANNER_HOME}/bin/sonar-scanner" \
+                                                --version
+
+                                            echo ""
+                                            echo "Running SonarQube SAST..."
+
+                                            "${SONAR_SCANNER_HOME}/bin/sonar-scanner" \
+                                                -Dsonar.token="$SONAR_TOKEN"
+
+                                            echo ""
+                                            echo "SonarQube SAST scan completed."
+
+                                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                    '''
+                                }
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 10. TRIVY CONTAINER SCAN
-    // WARNING ONLY
-    // ============================================================
+        // ========================================================
+        // 6. INSTALL DEPENDENCIES
+        // ========================================================
 
-    stage('Container Scan - Trivy') {
+        stage('Install Dependencies') {
 
-        steps {
-            script {
-                def stageName = "Container Scan - Trivy"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-10.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                sh '''
-                        set -o pipefail
-                        {
+                    def stageName =
+                        "Install Dependencies"
 
-                    set -e
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-6.log"
 
-                    echo "=========================================="
-                    echo "TRIVY CONTAINER SECURITY SCAN"
-                    echo "=========================================="
+                    try {
 
-                    echo ""
-                    echo "Checking Trivy..."
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                    trivy --version
+                            sh '''
+                                set -o pipefail
+                                {
+                                    set -e
 
-                    echo ""
-                    echo "Image:"
-                    echo "$ECR_URI:$BUILD_NUMBER"
+                                    echo "=========================================="
+                                    echo "INSTALL NODE.JS DEPENDENCIES"
+                                    echo "=========================================="
 
-                    echo ""
-                    echo "=========================================="
-                    echo "TRIVY POLICY"
-                    echo "=========================================="
+                                    echo ""
+                                    echo "Node version:"
+                                    node --version
 
-                    echo "Severity: HIGH, CRITICAL"
-                    echo "Mode: WARNING ONLY"
-                    echo "Pipeline will continue if vulnerabilities are found."
+                                    echo ""
+                                    echo "NPM version:"
+                                    npm --version
 
-                    echo ""
-                    echo "=========================================="
-                    echo "RUNNING TRIVY"
-                    echo "=========================================="
+                                    echo ""
+                                    echo "Installing dependencies..."
 
-                    trivy image \
-                        --scanners vuln \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 0 \
-                        "$ECR_URI:$BUILD_NUMBER"
+                                    npm ci
 
-                    echo ""
-                    echo "=========================================="
-                    echo "TRIVY RESULT"
-                    echo "=========================================="
+                                    echo ""
+                                    echo "Dependencies installed successfully."
 
-                    echo "Trivy scan completed."
-                    echo "HIGH/CRITICAL findings are reported as warnings."
-                    echo "Pipeline will continue."
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
 
-                    echo ""
-                    echo "Trivy stage completed successfully."
-            
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-        
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 11. AWS CONNECTION TEST
-    // ============================================================
+        // ========================================================
+        // 7. DEPENDENCY AUDIT
+        // WARNING ONLY
+        // ========================================================
 
-    stage('AWS Connection Test') {
+        stage('Dependency Audit') {
 
-        steps {
-            script {
-                def stageName = "AWS Connection Test"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-11.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+                    def stageName =
+                        "Dependency Audit"
 
-                    sh '''
-                        set -o pipefail
-                        {
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-7.log"
 
-                        set -e
+                    try {
 
-                        echo "=========================================="
-                        echo "AWS CONNECTION TEST"
-                        echo "=========================================="
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                        echo ""
-                        echo "AWS CLI version:"
-                        aws --version
+                            sh '''
+                                set -o pipefail
+                                {
 
-                        echo ""
-                        echo "AWS Region:"
-                        echo "$AWS_REGION"
+                                    echo "=========================================="
+                                    echo "NPM DEPENDENCY AUDIT"
+                                    echo "=========================================="
 
-                        echo ""
-                        echo "Testing AWS identity..."
+                                    echo ""
+                                    echo "Running npm audit..."
 
-                        aws sts get-caller-identity
+                                    set +e
 
-                        echo ""
-                        echo "AWS connection successful."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                                    npm audit --audit-level=high
+
+                                    AUDIT_EXIT_CODE=$?
+
+                                    set -e
+
+                                    echo ""
+                                    echo "npm audit exit code: $AUDIT_EXIT_CODE"
+
+                                    if [ "$AUDIT_EXIT_CODE" -ne 0 ]; then
+
+                                        echo ""
+                                        echo "WARNING: npm audit reported vulnerabilities."
+                                        echo "Pipeline will continue."
+
+                                    else
+
+                                        echo ""
+                                        echo "npm audit passed."
+
+                                    fi
+
+                                    echo ""
+                                    echo "Dependency audit stage completed."
+
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 12. ECR LOGIN
-    // ============================================================
+        // ========================================================
+        // 8. APPLICATION TEST
+        // ========================================================
 
-    stage('ECR Login') {
+        stage('Application Test') {
 
-        steps {
-            script {
-                def stageName = "ECR Login"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-12.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+                    def stageName =
+                        "Application Test"
 
-                    sh '''
-                        set -o pipefail
-                        {
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-8.log"
 
-                        set -e
+                    try {
 
-                        echo "=========================================="
-                        echo "ECR LOGIN"
-                        echo "=========================================="
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                        aws ecr get-login-password \
-                            --region "$AWS_REGION" \
-                        | docker login \
-                            --username AWS \
-                            --password-stdin \
-                            "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+                            sh '''
+                                set -o pipefail
+                                {
+                                    set -e
 
-                        echo ""
-                        echo "ECR login successful."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                                    echo "=========================================="
+                                    echo "APPLICATION TEST"
+                                    echo "=========================================="
+
+                                    TEST_SCRIPT=$(node -p \
+                                        "require('./package.json').scripts?.test || ''")
+
+                                    echo ""
+                                    echo "Configured test script:"
+                                    echo "$TEST_SCRIPT"
+
+                                    if [ -z "$TEST_SCRIPT" ]; then
+
+                                        echo ""
+                                        echo "No test script is configured."
+                                        echo "Skipping application tests."
+
+                                    elif echo "$TEST_SCRIPT" | grep -qi "no test specified"; then
+
+                                        echo ""
+                                        echo "Placeholder test script detected."
+                                        echo "No automated application tests are configured."
+                                        echo "Skipping application tests."
+
+                                    else
+
+                                        echo ""
+                                        echo "Running application tests..."
+
+                                        npm test
+
+                                        echo ""
+                                        echo "Application tests passed."
+
+                                    fi
+
+                                    echo ""
+                                    echo "Application test stage completed."
+
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 13. PUSH IMAGE TO ECR
-    // ============================================================
+        // ========================================================
+        // 9. DOCKER BUILD
+        // ========================================================
 
-    stage('Push Image to ECR') {
+        stage('Docker Build') {
 
-        steps {
-            script {
-                def stageName = "Push Image to ECR"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-13.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+                    def stageName =
+                        "Docker Build"
 
-                    sh '''
-                        set -o pipefail
-                        {
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-9.log"
 
-                        set -e
+                    try {
 
-                        echo "=========================================="
-                        echo "PUSH IMAGE TO ECR"
-                        echo "=========================================="
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                        echo ""
-                        echo "Pushing build image..."
+                            sh '''
+                                set -o pipefail
+                                {
+                                    set -e
 
-                        docker push \
-                            "$ECR_URI:$BUILD_NUMBER"
+                                    echo "=========================================="
+                                    echo "DOCKER IMAGE BUILD"
+                                    echo "=========================================="
 
-                        echo ""
-                        echo "Pushing latest image..."
+                                    echo ""
+                                    echo "Docker version:"
+                                    docker --version
 
-                        docker push \
-                            "$ECR_URI:latest"
+                                    echo ""
+                                    echo "Building image..."
 
-                        echo ""
-                        echo "Image pushed successfully."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                                    docker build \
+                                        -t "$ECR_URI:$BUILD_NUMBER" \
+                                        -t "$ECR_URI:latest" \
+                                        .
+
+                                    echo ""
+                                    echo "Docker image built successfully."
+
+                                    echo ""
+                                    echo "Built images:"
+
+                                    docker images | grep "$ECR_REPOSITORY" || true
+
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 14. GET ECR IMAGE DIGEST
-    // ============================================================
+        // ========================================================
+        // 10. TRIVY CONTAINER SCAN
+        // WARNING ONLY
+        // ========================================================
 
-    stage('Get ECR Image Digest') {
+        stage('Container Scan - Trivy') {
 
-        steps {
-            script {
-                def stageName = "Get ECR Image Digest"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-14.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+                    def stageName =
+                        "Container Scan - Trivy"
 
-                    sh '''
-                        set -o pipefail
-                        {
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-10.log"
 
-                        set -e
+                    try {
 
-                        echo "=========================================="
-                        echo "GET ECR IMAGE DIGEST"
-                        echo "=========================================="
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                        IMAGE_DIGEST=$(aws ecr describe-images \
-                            --repository-name "$ECR_REPOSITORY" \
-                            --image-ids imageTag="$BUILD_NUMBER" \
-                            --region "$AWS_REGION" \
-                            --query 'imageDetails[0].imageDigest' \
-                            --output text)
+                            sh '''
+                                set -o pipefail
+                                {
+                                    set -e
 
-                        echo ""
-                        echo "ECR Image Digest:"
-                        echo "$IMAGE_DIGEST"
+                                    echo "=========================================="
+                                    echo "TRIVY CONTAINER SECURITY SCAN"
+                                    echo "=========================================="
 
-                        test -n "$IMAGE_DIGEST"
-                        test "$IMAGE_DIGEST" != "None"
+                                    echo ""
+                                    echo "Checking Trivy..."
 
-                        echo ""
-                        echo "ECR image digest retrieved successfully."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                                    trivy --version
+
+                                    echo ""
+                                    echo "Image:"
+                                    echo "$ECR_URI:$BUILD_NUMBER"
+
+                                    echo ""
+                                    echo "=========================================="
+                                    echo "TRIVY POLICY"
+                                    echo "=========================================="
+
+                                    echo "Severity: HIGH, CRITICAL"
+                                    echo "Mode: WARNING ONLY"
+                                    echo "Pipeline will continue if vulnerabilities are found."
+
+                                    echo ""
+                                    echo "=========================================="
+                                    echo "RUNNING TRIVY"
+                                    echo "=========================================="
+
+                                    trivy image \
+                                        --scanners vuln \
+                                        --severity HIGH,CRITICAL \
+                                        --exit-code 0 \
+                                        "$ECR_URI:$BUILD_NUMBER"
+
+                                    echo ""
+                                    echo "=========================================="
+                                    echo "TRIVY RESULT"
+                                    echo "=========================================="
+
+                                    echo "Trivy scan completed."
+                                    echo "HIGH/CRITICAL findings are reported as warnings."
+                                    echo "Pipeline will continue."
+
+                                    echo ""
+                                    echo "Trivy stage completed successfully."
+
+                                } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                            '''
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 15. VERIFY EC2 SSM CONNECTION
-    // ============================================================
+        // ========================================================
+        // 11. AWS CONNECTION TEST
+        // ========================================================
 
-    stage('Verify EC2 SSM Connection') {
+        stage('AWS Connection Test') {
 
-        steps {
-            script {
-                def stageName = "Verify EC2 SSM Connection"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-15.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+                    def stageName =
+                        "AWS Connection Test"
 
-                    sh '''
-                        set -o pipefail
-                        {
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-11.log"
 
-                        set -e
+                    try {
 
-                        echo "=========================================="
-                        echo "VERIFY EC2 SSM CONNECTION"
-                        echo "=========================================="
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                        echo ""
-                        echo "EC2 Instance:"
-                        echo "$EC2_INSTANCE_ID"
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
 
-                        echo ""
-                        echo "Checking EC2 state..."
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
 
-                        INSTANCE_STATE=$(aws ec2 describe-instances \
-                            --instance-ids "$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'Reservations[0].Instances[0].State.Name' \
-                            --output text)
+                                sh '''
+                                    set -o pipefail
+                                    {
+                                        set -e
 
-                        echo "EC2 state: $INSTANCE_STATE"
+                                        echo "=========================================="
+                                        echo "AWS CONNECTION TEST"
+                                        echo "=========================================="
 
-                        if [ "$INSTANCE_STATE" != "running" ]; then
+                                        echo ""
+                                        echo "AWS CLI version:"
+                                        aws --version
 
-                            echo ""
-                            echo "ERROR: EC2 instance is not running."
-                            exit 1
+                                        echo ""
+                                        echo "AWS Region:"
+                                        echo "$AWS_REGION"
 
-                        fi
+                                        echo ""
+                                        echo "Testing AWS identity..."
 
-                        echo ""
-                        echo "Checking SSM agent..."
+                                        aws sts get-caller-identity
 
-                        SSM_STATUS=$(aws ssm describe-instance-information \
-                            --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'InstanceInformationList[0].PingStatus' \
-                            --output text)
+                                        echo ""
+                                        echo "AWS connection successful."
 
-                        echo "SSM status: $SSM_STATUS"
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
 
-                        if [ "$SSM_STATUS" != "Online" ]; then
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
 
-                            echo ""
-                            echo "ERROR: EC2 instance is not online in SSM."
-                            exit 1
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
 
-                        fi
+                    } catch (Exception e) {
 
-                        echo ""
-                        echo "EC2 and SSM connection verified successfully."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 16. DEPLOY TO EC2 VIA SSM
-    // ============================================================
+        // ========================================================
+        // 12. ECR LOGIN
+        // ========================================================
 
-    stage('Deploy to EC2 via SSM') {
+        stage('ECR Login') {
 
-        steps {
-            script {
-                def stageName = "Deploy to EC2 via SSM"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-16.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
+
+                script {
+
+                    def stageName =
+                        "ECR Login"
+
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-12.log"
+
+                    try {
+
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
+
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
+
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
+
+                                sh '''
+                                    set -o pipefail
+                                    {
+                                        set -e
+
+                                        echo "=========================================="
+                                        echo "ECR LOGIN"
+                                        echo "=========================================="
+
+                                        aws ecr get-login-password \
+                                            --region "$AWS_REGION" \
+                                        | docker login \
+                                            --username AWS \
+                                            --password-stdin \
+                                            "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+                                        echo ""
+                                        echo "ECR login successful."
+
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
+                    }
+                }
+            }
+        }
 
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+        // ========================================================
+        // 13. PUSH IMAGE TO ECR
+        // ========================================================
 
-                    sh '''
-                        set -o pipefail
-                        {
+        stage('Push Image to ECR') {
 
-                        set -e
+            steps {
 
-                        echo "=========================================="
-                        echo "DEPLOY TO EC2 VIA SSM"
-                        echo "=========================================="
+                script {
 
-                        echo ""
-                        echo "Creating deployment script..."
+                    def stageName =
+                        "Push Image to ECR"
 
-                        cat > /tmp/ec2-deploy.sh <<EOF
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-13.log"
+
+                    try {
+
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
+
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
+
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
+
+                                sh '''
+                                    set -o pipefail
+                                    {
+                                        set -e
+
+                                        echo "=========================================="
+                                        echo "PUSH IMAGE TO ECR"
+                                        echo "=========================================="
+
+                                        echo ""
+                                        echo "Pushing build image..."
+
+                                        docker push \
+                                            "$ECR_URI:$BUILD_NUMBER"
+
+                                        echo ""
+                                        echo "Pushing latest image..."
+
+                                        docker push \
+                                            "$ECR_URI:latest"
+
+                                        echo ""
+                                        echo "Image pushed successfully."
+
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
+                    }
+                }
+            }
+        }
+
+
+        // ========================================================
+        // 14. GET ECR IMAGE DIGEST
+        // ========================================================
+
+        stage('Get ECR Image Digest') {
+
+            steps {
+
+                script {
+
+                    def stageName =
+                        "Get ECR Image Digest"
+
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-14.log"
+
+                    try {
+
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
+
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
+
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
+
+                                sh '''
+                                    set -o pipefail
+                                    {
+                                        set -e
+
+                                        echo "=========================================="
+                                        echo "GET ECR IMAGE DIGEST"
+                                        echo "=========================================="
+
+                                        IMAGE_DIGEST=$(aws ecr describe-images \
+                                            --repository-name "$ECR_REPOSITORY" \
+                                            --image-ids imageTag="$BUILD_NUMBER" \
+                                            --region "$AWS_REGION" \
+                                            --query 'imageDetails[0].imageDigest' \
+                                            --output text)
+
+                                        echo ""
+                                        echo "ECR Image Digest:"
+                                        echo "$IMAGE_DIGEST"
+
+                                        test -n "$IMAGE_DIGEST"
+                                        test "$IMAGE_DIGEST" != "None"
+
+                                        echo ""
+                                        echo "ECR image digest retrieved successfully."
+
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
+                    }
+                }
+            }
+        }
+
+
+        // ========================================================
+        // 15. VERIFY EC2 SSM CONNECTION
+        // ========================================================
+
+        stage('Verify EC2 SSM Connection') {
+
+            steps {
+
+                script {
+
+                    def stageName =
+                        "Verify EC2 SSM Connection"
+
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-15.log"
+
+                    try {
+
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
+
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
+
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
+
+                                sh '''
+                                    set -o pipefail
+                                    {
+                                        set -e
+
+                                        echo "=========================================="
+                                        echo "VERIFY EC2 SSM CONNECTION"
+                                        echo "=========================================="
+
+                                        echo ""
+                                        echo "EC2 Instance:"
+                                        echo "$EC2_INSTANCE_ID"
+
+                                        echo ""
+                                        echo "Checking EC2 state..."
+
+                                        INSTANCE_STATE=$(aws ec2 describe-instances \
+                                            --instance-ids "$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query 'Reservations[0].Instances[0].State.Name' \
+                                            --output text)
+
+                                        echo "EC2 state: $INSTANCE_STATE"
+
+                                        if [ "$INSTANCE_STATE" != "running" ]; then
+
+                                            echo ""
+                                            echo "ERROR: EC2 instance is not running."
+
+                                            exit 1
+                                        fi
+
+                                        echo ""
+                                        echo "Checking SSM agent..."
+
+                                        SSM_STATUS=$(aws ssm describe-instance-information \
+                                            --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query 'InstanceInformationList[0].PingStatus' \
+                                            --output text)
+
+                                        echo "SSM status: $SSM_STATUS"
+
+                                        if [ "$SSM_STATUS" != "Online" ]; then
+
+                                            echo ""
+                                            echo "ERROR: EC2 instance is not online in SSM."
+
+                                            exit 1
+                                        fi
+
+                                        echo ""
+                                        echo "EC2 and SSM connection verified successfully."
+
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
+                    }
+                }
+            }
+        }
+
+
+        // ========================================================
+        // 16. DEPLOY TO EC2 VIA SSM
+        // ========================================================
+
+        stage('Deploy to EC2 via SSM') {
+
+            steps {
+
+                script {
+
+                    def stageName =
+                        "Deploy to EC2 via SSM"
+
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-16.log"
+
+                    try {
+
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
+
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
+
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
+
+                                sh '''
+                                    set -o pipefail
+                                    {
+
+                                        set -e
+
+                                        echo "=========================================="
+                                        echo "DEPLOY TO EC2 VIA SSM"
+                                        echo "=========================================="
+
+                                        echo ""
+                                        echo "Creating deployment script..."
+
+                                        cat > /tmp/ec2-deploy.sh <<EOF
 #!/bin/bash
 
 set -e
@@ -1204,17 +1923,17 @@ echo "EC2 deployment successful."
 
 EOF
 
-                        chmod +x /tmp/ec2-deploy.sh
+                                        chmod +x /tmp/ec2-deploy.sh
 
-                        echo ""
-                        echo "Encoding deployment script..."
+                                        echo ""
+                                        echo "Encoding deployment script..."
 
-                        DEPLOY_SCRIPT_B64=$(base64 -w0 /tmp/ec2-deploy.sh)
+                                        DEPLOY_SCRIPT_B64=$(base64 -w0 /tmp/ec2-deploy.sh)
 
-                        echo ""
-                        echo "Creating SSM parameter JSON..."
+                                        echo ""
+                                        echo "Creating SSM parameter JSON..."
 
-                        python3 - "$DEPLOY_SCRIPT_B64" > /tmp/ssm-parameters.json <<'PY'
+                                        python3 - "$DEPLOY_SCRIPT_B64" > /tmp/ssm-parameters.json <<'PY'
 import json
 import sys
 
@@ -1231,159 +1950,189 @@ print(json.dumps({
 }))
 PY
 
-                        echo ""
-                        echo "Validating SSM parameter JSON..."
+                                        echo ""
+                                        echo "Validating SSM parameter JSON..."
 
-                        python3 -m json.tool \
-                            /tmp/ssm-parameters.json
+                                        python3 -m json.tool \
+                                            /tmp/ssm-parameters.json
 
-                        echo ""
-                        echo "Sending deployment command to EC2..."
+                                        echo ""
+                                        echo "Sending deployment command to EC2..."
 
-                        SSM_COMMAND_ID=$(aws ssm send-command \
-                            --instance-ids "$EC2_INSTANCE_ID" \
-                            --document-name "AWS-RunShellScript" \
-                            --comment "DevSecOps deployment - build $BUILD_NUMBER" \
-                            --parameters file:///tmp/ssm-parameters.json \
-                            --region "$AWS_REGION" \
-                            --query 'Command.CommandId' \
-                            --output text)
+                                        SSM_COMMAND_ID=$(aws ssm send-command \
+                                            --instance-ids "$EC2_INSTANCE_ID" \
+                                            --document-name "AWS-RunShellScript" \
+                                            --comment "DevSecOps deployment - build $BUILD_NUMBER" \
+                                            --parameters file:///tmp/ssm-parameters.json \
+                                            --region "$AWS_REGION" \
+                                            --query 'Command.CommandId' \
+                                            --output text)
 
-                        echo ""
-                        echo "SSM Command ID:"
-                        echo "$SSM_COMMAND_ID"
+                                        echo ""
+                                        echo "SSM Command ID:"
+                                        echo "$SSM_COMMAND_ID"
 
-                        test -n "$SSM_COMMAND_ID"
+                                        test -n "$SSM_COMMAND_ID"
 
-                        echo ""
-                        echo "Waiting for deployment..."
+                                        echo ""
+                                        echo "Waiting for deployment..."
 
-                        COMMAND_STATUS="Pending"
+                                        COMMAND_STATUS="Pending"
 
-                        for i in $(seq 1 36); do
+                                        for i in $(seq 1 36); do
 
-                            COMMAND_STATUS=$(aws ssm get-command-invocation \
-                                --command-id "$SSM_COMMAND_ID" \
-                                --instance-id "$EC2_INSTANCE_ID" \
-                                --region "$AWS_REGION" \
-                                --query 'Status' \
-                                --output text 2>/dev/null || true)
+                                            COMMAND_STATUS=$(aws ssm get-command-invocation \
+                                                --command-id "$SSM_COMMAND_ID" \
+                                                --instance-id "$EC2_INSTANCE_ID" \
+                                                --region "$AWS_REGION" \
+                                                --query 'Status' \
+                                                --output text 2>/dev/null || true)
 
-                            echo "Attempt $i/36 - Status: $COMMAND_STATUS"
+                                            echo "Attempt $i/36 - Status: $COMMAND_STATUS"
 
-                            case "$COMMAND_STATUS" in
+                                            case "$COMMAND_STATUS" in
 
-                                Success)
-                                    break
-                                    ;;
+                                                Success)
+                                                    break
+                                                    ;;
 
-                                Failed|Cancelled|TimedOut|Cancelling)
-                                    break
-                                    ;;
+                                                Failed|Cancelled|TimedOut|Cancelling)
+                                                    break
+                                                    ;;
 
-                            esac
+                                            esac
 
-                            sleep 5
+                                            sleep 5
 
-                        done
+                                        done
 
-                        echo ""
-                        echo "=========================================="
-                        echo "SSM DEPLOYMENT RESULT"
-                        echo "=========================================="
+                                        echo ""
+                                        echo "=========================================="
+                                        echo "SSM DEPLOYMENT RESULT"
+                                        echo "=========================================="
 
-                        echo ""
-                        echo "Status:"
-                        echo "$COMMAND_STATUS"
+                                        echo ""
+                                        echo "Status:"
+                                        echo "$COMMAND_STATUS"
 
-                        echo ""
-                        echo "Command output:"
+                                        echo ""
+                                        echo "Command output:"
 
-                        aws ssm get-command-invocation \
-                            --command-id "$SSM_COMMAND_ID" \
-                            --instance-id "$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'StandardOutputContent' \
-                            --output text
+                                        aws ssm get-command-invocation \
+                                            --command-id "$SSM_COMMAND_ID" \
+                                            --instance-id "$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query 'StandardOutputContent' \
+                                            --output text
 
-                        echo ""
-                        echo "Command error output:"
+                                        echo ""
+                                        echo "Command error output:"
 
-                        aws ssm get-command-invocation \
-                            --command-id "$SSM_COMMAND_ID" \
-                            --instance-id "$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'StandardErrorContent' \
-                            --output text
+                                        aws ssm get-command-invocation \
+                                            --command-id "$SSM_COMMAND_ID" \
+                                            --instance-id "$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query 'StandardErrorContent' \
+                                            --output text
 
-                        if [ "$COMMAND_STATUS" != "Success" ]; then
+                                        if [ "$COMMAND_STATUS" != "Success" ]; then
 
-                            echo ""
-                            echo "ERROR: EC2 deployment failed."
-                            exit 1
+                                            echo ""
+                                            echo "ERROR: EC2 deployment failed."
 
-                        fi
+                                            exit 1
+                                        fi
 
-                        echo ""
-                        echo "=========================================="
-                        echo "EC2 DEPLOYMENT SUCCESSFUL"
-                        echo "=========================================="
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                                        echo ""
+                                        echo "=========================================="
+                                        echo "EC2 DEPLOYMENT SUCCESSFUL"
+                                        echo "=========================================="
+
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
-    }
 
 
-    // ============================================================
-    // 17. APPLICATION HEALTH CHECK
-    // ============================================================
+        // ========================================================
+        // 17. APPLICATION HEALTH CHECK
+        // ========================================================
 
-    stage('Application Health Check') {
+        stage('Application Health Check') {
 
-        steps {
-            script {
-                def stageName = "Application Health Check"
-                def stageOutputFile = "/tmp/jenkins-stage-${BUILD_NUMBER}-17.log"
-                try {
-                    withEnv(["STAGE_OUTPUT_FILE=${stageOutputFile}"] ) {
+            steps {
 
+                script {
 
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS_ID}"
-                    ]
-                ]) {
+                    def stageName =
+                        "Application Health Check"
 
-                    sh '''
-                        set -o pipefail
-                        {
+                    def stageOutputFile =
+                        "/tmp/jenkins-stage-${BUILD_NUMBER}-17.log"
 
-                        set -e
+                    try {
 
-                        echo "=========================================="
-                        echo "APPLICATION HEALTH CHECK"
-                        echo "=========================================="
+                        withEnv([
+                            "STAGE_OUTPUT_FILE=${stageOutputFile}"
+                        ]) {
 
-                        echo ""
-                        echo "Creating health-check parameters..."
+                            withCredentials([
+                                [
+                                    $class:
+                                        'AmazonWebServicesCredentialsBinding',
 
-                        python3 > /tmp/healthcheck-parameters.json <<PY
+                                    credentialsId:
+                                        "${AWS_CREDENTIALS_ID}"
+                                ]
+                            ]) {
+
+                                sh '''
+                                    set -o pipefail
+                                    {
+
+                                        set -e
+
+                                        echo "=========================================="
+                                        echo "APPLICATION HEALTH CHECK"
+                                        echo "=========================================="
+
+                                        echo ""
+                                        echo "Creating health-check parameters..."
+
+                                        python3 > /tmp/healthcheck-parameters.json <<PY
 import json
 
 print(json.dumps({
@@ -1393,229 +2142,271 @@ print(json.dumps({
 }))
 PY
 
-                        echo ""
-                        echo "Health-check parameters:"
+                                        echo ""
+                                        echo "Health-check parameters:"
 
-                        python3 -m json.tool \
-                            /tmp/healthcheck-parameters.json
+                                        python3 -m json.tool \
+                                            /tmp/healthcheck-parameters.json
 
-                        echo ""
-                        echo "Running health check through SSM..."
+                                        echo ""
+                                        echo "Running health check through SSM..."
 
-                        HEALTH_COMMAND_ID=$(aws ssm send-command \
-                            --instance-ids "$EC2_INSTANCE_ID" \
-                            --document-name "AWS-RunShellScript" \
-                            --comment "Application health check - build $BUILD_NUMBER" \
-                            --parameters file:///tmp/healthcheck-parameters.json \
-                            --region "$AWS_REGION" \
-                            --query 'Command.CommandId' \
-                            --output text)
+                                        HEALTH_COMMAND_ID=$(aws ssm send-command \
+                                            --instance-ids "$EC2_INSTANCE_ID" \
+                                            --document-name "AWS-RunShellScript" \
+                                            --comment "Application health check - build $BUILD_NUMBER" \
+                                            --parameters file:///tmp/healthcheck-parameters.json \
+                                            --region "$AWS_REGION" \
+                                            --query 'Command.CommandId' \
+                                            --output text)
 
-                        echo ""
-                        echo "Health Check Command ID:"
-                        echo "$HEALTH_COMMAND_ID"
+                                        echo ""
+                                        echo "Health Check Command ID:"
+                                        echo "$HEALTH_COMMAND_ID"
 
-                        test -n "$HEALTH_COMMAND_ID"
+                                        test -n "$HEALTH_COMMAND_ID"
 
-                        echo ""
-                        echo "Waiting for health check..."
+                                        echo ""
+                                        echo "Waiting for health check..."
 
-                        HEALTH_STATUS="Pending"
+                                        HEALTH_STATUS="Pending"
 
-                        for i in $(seq 1 24); do
+                                        for i in $(seq 1 24); do
 
-                            HEALTH_STATUS=$(aws ssm get-command-invocation \
-                                --command-id "$HEALTH_COMMAND_ID" \
-                                --instance-id "$EC2_INSTANCE_ID" \
-                                --region "$AWS_REGION" \
-                                --query 'Status' \
-                                --output text 2>/dev/null || true)
+                                            HEALTH_STATUS=$(aws ssm get-command-invocation \
+                                                --command-id "$HEALTH_COMMAND_ID" \
+                                                --instance-id "$EC2_INSTANCE_ID" \
+                                                --region "$AWS_REGION" \
+                                                --query 'Status' \
+                                                --output text 2>/dev/null || true)
 
-                            echo "Attempt $i/24 - Status: $HEALTH_STATUS"
+                                            echo "Attempt $i/24 - Status: $HEALTH_STATUS"
 
-                            case "$HEALTH_STATUS" in
+                                            case "$HEALTH_STATUS" in
 
-                                Success)
-                                    break
-                                    ;;
+                                                Success)
+                                                    break
+                                                    ;;
 
-                                Failed|Cancelled|TimedOut|Cancelling)
-                                    break
-                                    ;;
+                                                Failed|Cancelled|TimedOut|Cancelling)
+                                                    break
+                                                    ;;
 
-                            esac
+                                            esac
 
-                            sleep 5
+                                            sleep 5
 
-                        done
+                                        done
 
-                        echo ""
-                        echo "=========================================="
-                        echo "HEALTH CHECK RESULT"
-                        echo "=========================================="
+                                        echo ""
+                                        echo "=========================================="
+                                        echo "HEALTH CHECK RESULT"
+                                        echo "=========================================="
 
-                        echo ""
-                        echo "Status:"
-                        echo "$HEALTH_STATUS"
+                                        echo ""
+                                        echo "Status:"
+                                        echo "$HEALTH_STATUS"
 
-                        echo ""
-                        echo "Application output:"
+                                        echo ""
+                                        echo "Application output:"
 
-                        aws ssm get-command-invocation \
-                            --command-id "$HEALTH_COMMAND_ID" \
-                            --instance-id "$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'StandardOutputContent' \
-                            --output text
+                                        aws ssm get-command-invocation \
+                                            --command-id "$HEALTH_COMMAND_ID" \
+                                            --instance-id "$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query 'StandardOutputContent' \
+                                            --output text
 
-                        echo ""
-                        echo "Application error output:"
+                                        echo ""
+                                        echo "Application error output:"
 
-                        aws ssm get-command-invocation \
-                            --command-id "$HEALTH_COMMAND_ID" \
-                            --instance-id "$EC2_INSTANCE_ID" \
-                            --region "$AWS_REGION" \
-                            --query 'StandardErrorContent' \
-                            --output text
+                                        aws ssm get-command-invocation \
+                                            --command-id "$HEALTH_COMMAND_ID" \
+                                            --instance-id "$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query 'StandardErrorContent' \
+                                            --output text
 
-                        if [ "$HEALTH_STATUS" != "Success" ]; then
+                                        if [ "$HEALTH_STATUS" != "Success" ]; then
 
-                            echo ""
-                            echo "ERROR: Application health check failed."
+                                            echo ""
+                                            echo "ERROR: Application health check failed."
 
-                            exit 1
+                                            exit 1
+                                        fi
 
-                        fi
+                                        echo ""
+                                        echo "=========================================="
+                                        echo "APPLICATION HEALTH CHECK PASSED"
+                                        echo "=========================================="
 
-                        echo ""
-                        echo "=========================================="
-                        echo "APPLICATION HEALTH CHECK PASSED"
-                        echo "=========================================="
+                                        echo ""
+                                        echo "Application is healthy on EC2."
 
-                        echo ""
-                        echo "Application is healthy on EC2."
-                
-                        } 2>&1 | tee "$STAGE_OUTPUT_FILE"
-                    '''
-                
-                }
-        
+                                    } 2>&1 | tee "$STAGE_OUTPUT_FILE"
+                                '''
+                            }
+                        }
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : "Stage completed successfully."
+
+                        notifyStage(
+                            stageName,
+                            "SUCCESS",
+                            stageOutput
+                        )
+
+                    } catch (Exception e) {
+
+                        def stageOutput =
+                            fileExists(stageOutputFile)
+                                ? readFile(stageOutputFile)
+                                : (
+                                    e.getMessage()
+                                        ?: "Stage failed before output was captured."
+                                )
+
+                        notifyStage(
+                            stageName,
+                            "FAILURE",
+                            stageOutput
+                        )
+
+                        throw e
                     }
-
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : "Stage completed successfully."
-                    notifyStage(stageName, "SUCCESS", stageOutput)
-
-                } catch (Exception e) {
-                    def stageOutput = fileExists(stageOutputFile) ? readFile(stageOutputFile) : (e.getMessage() ?: "Stage failed before output was captured.")
-                    notifyStage(stageName, "FAILURE", stageOutput)
-                    throw e
                 }
             }
         }
     }
-}
-// ================================================================ // POST ACTIONS // ================================================================
-post {
-always {
 
-    echo ""
-    echo "=========================================="
-    echo "PIPELINE EXECUTION COMPLETED"
-    echo "=========================================="
 
-    script {
-        echo "Stage notifications were sent after each pipeline stage."
+    // ============================================================
+    // POST ACTIONS
+    // ============================================================
+
+    post {
+
+        always {
+
+            echo ""
+            echo "=========================================="
+            echo "PIPELINE EXECUTION COMPLETED"
+            echo "=========================================="
+
+            script {
+
+                /*
+                 * IMPORTANT:
+                 *
+                 * The complete notification MUST happen BEFORE
+                 * the temporary stage log files are deleted.
+                 */
+
+                notifyCompleteBuild()
+            }
+
+
+            // ====================================================
+            // CLEAN TEMPORARY FILES
+            // ====================================================
+
+            sh '''
+                rm -f \
+                    /tmp/ec2-deploy.sh \
+                    /tmp/ssm-parameters.json \
+                    /tmp/healthcheck-parameters.json \
+                    /tmp/healthcheck.json \
+                    /tmp/lambda-payload.json \
+                    /tmp/lambda-response.json \
+                    /tmp/pipeline-notification-*.json \
+                    /tmp/pipeline-notification-response-*.json \
+                    /tmp/stage-notification-*.json \
+                    /tmp/stage-notification-response-*.json \
+                    /tmp/jenkins-stage-${BUILD_NUMBER}-*.log \
+                    /tmp/complete-build-${BUILD_NUMBER}.log \
+                    2>/dev/null || true
+            '''
+
+            echo ""
+            echo "=========================================="
+            echo "POST ACTIONS COMPLETED"
+            echo "=========================================="
+        }
+
+
+        // ========================================================
+        // SUCCESS
+        // ========================================================
+
+        success {
+
+            echo ""
+            echo "=========================================="
+            echo "DEVSECOPS PIPELINE SUCCESS"
+            echo "=========================================="
+
+            echo ""
+            echo "Build Number:"
+            echo "${BUILD_NUMBER}"
+
+            echo ""
+            echo "Docker Image:"
+            echo "${ECR_URI}:${BUILD_NUMBER}"
+
+            echo ""
+            echo "Deployment:"
+            echo "EC2 via AWS SSM"
+
+            echo ""
+            echo "Security:"
+            echo "Gitleaks - Passed"
+            echo "SonarQube - Completed"
+            echo "npm Audit - Completed"
+            echo "Trivy - Warning Only"
+
+            echo ""
+            echo "Application:"
+            echo "Health Check Passed"
+
+            echo ""
+            echo "=========================================="
+        }
+
+
+        // ========================================================
+        // FAILURE
+        // ========================================================
+
+        failure {
+
+            echo ""
+            echo "=========================================="
+            echo "DEVSECOPS PIPELINE FAILED"
+            echo "=========================================="
+
+            echo ""
+            echo "Check the FIRST failed stage in Console Output."
+
+            echo ""
+            echo "Possible areas:"
+
+            echo "1. Gitleaks"
+            echo "2. SonarQube"
+            echo "3. npm dependencies"
+            echo "4. Application test"
+            echo "5. Docker"
+            echo "6. Trivy"
+            echo "7. AWS credentials"
+            echo "8. ECR"
+            echo "9. SSM"
+            echo "10. EC2 deployment"
+            echo "11. Application health check"
+
+            echo ""
+            echo "=========================================="
+        }
     }
-
-
-    // ============================================================
-    // CLEAN TEMPORARY FILES
-    // ============================================================
-
-    sh '''
-        rm -f \
-            /tmp/ec2-deploy.sh \
-            /tmp/ssm-parameters.json \
-            /tmp/healthcheck-parameters.json \
-            /tmp/healthcheck.json \
-            /tmp/lambda-payload.json \
-            /tmp/lambda-response.json \
-            /tmp/stage-notification-${BUILD_NUMBER}.json \
-            /tmp/stage-notification-response-${BUILD_NUMBER}.json \
-            /tmp/jenkins-stage-${BUILD_NUMBER}-*.log \
-            2>/dev/null || true
-    '''
-
-
-    echo ""
-    echo "=========================================="
-    echo "POST ACTIONS COMPLETED"
-    echo "=========================================="
-}
-
-
-success {
-
-    echo ""
-    echo "=========================================="
-    echo "DEVSECOPS PIPELINE SUCCESS"
-    echo "=========================================="
-
-    echo ""
-    echo "Build Number:"
-    echo "${BUILD_NUMBER}"
-
-    echo ""
-    echo "Docker Image:"
-    echo "${ECR_URI}:${BUILD_NUMBER}"
-
-    echo ""
-    echo "Deployment:"
-    echo "EC2 via AWS SSM"
-
-    echo ""
-    echo "Security:"
-    echo "Gitleaks - Passed"
-    echo "SonarQube - Completed"
-    echo "npm Audit - Completed"
-    echo "Trivy - Warning Only"
-
-    echo ""
-    echo "Application:"
-    echo "Health Check Passed"
-
-    echo ""
-    echo "=========================================="
-}
-
-
-failure {
-
-    echo ""
-    echo "=========================================="
-    echo "DEVSECOPS PIPELINE FAILED"
-    echo "=========================================="
-
-    echo ""
-    echo "Check the FIRST failed stage in Console Output."
-
-    echo ""
-    echo "Possible areas:"
-
-    echo "1. Gitleaks"
-    echo "2. SonarQube"
-    echo "3. npm dependencies"
-    echo "4. Application test"
-    echo "5. Docker"
-    echo "6. Trivy"
-    echo "7. AWS credentials"
-    echo "8. ECR"
-    echo "9. SSM"
-    echo "10. EC2 deployment"
-    echo "11. Application health check"
-
-    echo ""
-    echo "=========================================="
-}
-}
 }
